@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+# 手机上的版本时间按北京时间比较；GitHub runner 默认 UTC，会让“新旧”判断差 8 小时
+env:
+  TZ: Asia/Shanghai
+
 concurrency:
   group: beifa-update
   cancel-in-progress: true
