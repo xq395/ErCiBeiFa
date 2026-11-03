@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_desc">当日课表、空闲时段和下一课时，点击进入</string>
+    <string name="widget_mini_desc">连续天数和今天进度</string>
+    <string name="widget_label">北伐 · 今日课表</string>
+    <string name="widget_mini_label">北伐 · 进度</string>
+</resources>

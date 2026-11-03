@@ -1,0 +1,52 @@
+name: 构建手机更新包
+
+# 每次推送到 main：扫描密钥 → 打包页面 → 更新 update 分支
+# 手机在 设置 → 更新 → GitHub 更新源 填 "用户名/仓库" 即可远程更新（只换页面代码）
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beifa-update
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 检查 Key / 本机数据
+        run: python tools/check_secrets.py
+
+      - name: 打包页面并冒烟测试
+        run: python tools/build.py
+
+      - name: 整理 update 分支文件
+        run: python tools/make_update_branch.py
+
+      - name: 验证更新链路
+        run: node tools/test_update.js
+
+      - name: 发布到 update 分支
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: update
+          publish_dir: .update-branch
+          force_orphan: true
+          user_name: github-actions[bot]
+          user_email: github-actions[bot]@users.noreply.github.com

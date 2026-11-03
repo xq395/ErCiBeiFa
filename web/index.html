@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14161a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="北伐打卡">
+<title>北伐打卡</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="top">
+    <div>
+      <div id="hDate" class="hdate"></div>
+      <div id="hPhase" class="hphase"></div>
+    </div>
+    <div class="right">
+      <div id="hCount" class="hcount"></div>
+      <button id="syncBtn" class="sync" title="同步">●</button>
+      <button id="setBtn" class="setbtn" data-tab="set" title="设置">⚙</button>
+    </div>
+  </div>
+</header>
+
+<div id="fileWarn" class="notice hidden">
+  <b>你现在打开的是本地文件（file://），不是电脑版</b><br>
+  每个地址的浏览器存储是分开的，所以这里看着是全新的。正确入口是双击项目文件夹里的「启动.bat」，
+  它会启动服务并自动打开 <code>http://127.0.0.1:8765</code>。
+  <div class="btns"><a class="mini" href="http://127.0.0.1:8765">打开电脑版</a>
+    <button class="mini ghost" id="fileWarnX">先留在这里</button></div>
+</div>
+
+<div id="firstHint" class="notice hidden"></div>
+
+<main>
+  <section id="tab-today" class="tab on"></section>
+  <section id="tab-tt" class="tab"></section>
+  <section id="tab-lessons" class="tab"></section>
+  <section id="tab-stats" class="tab"></section>
+  <section id="tab-chat" class="tab"></section>
+  <section id="tab-plan" class="tab"></section>
+  <section id="tab-kb" class="tab"></section>
+  <section id="tab-set" class="tab"></section>
+</main>
+
+<div id="timerBar" class="timerbar hidden">
+  <div><span id="tSubj"></span> <b id="tLeft">40:00</b></div>
+  <div class="tlesson" id="tLesson"></div>
+  <div class="tbtns">
+    <button id="tStop">结束并记录</button>
+    <button id="tCancel" class="ghost">放弃</button>
+  </div>
+</div>
+
+<nav>
+  <button data-tab="today" class="on">今天</button>
+  <button data-tab="chat">管家</button>
+  <button data-tab="tt">课表</button>
+  <button data-tab="lessons">课时</button>
+  <button data-tab="stats">看板</button>
+  <button data-tab="plan">目标</button>
+  <button data-tab="kb">知识</button>
+</nav>
+
+<div id="modal" class="modal hidden"></div>
+<div id="toast" class="toast"></div>
+
+<script src="syllabus.js"></script>
+<script src="courses.js"></script>
+<script src="core.js"></script>
+<script src="ai.js"></script>
+<script src="math.js"></script>
+<script src="timetable.js"></script>
+<script src="agent.js"></script>
+<script src="memory.js"></script>
+<script src="events.js"></script>
+<script src="chatctl.js"></script>
+<script src="today.js"></script>
+<script src="views.js"></script>
+<script src="goals.js"></script>
+<script src="update.js"></script>
+<script src="settings.js"></script>
+<script src="kb.js"></script>
+<script src="kbui.js"></script>
+<script src="stars.js"></script>
+<script src="threads.js"></script>
+<script src="chatact.js"></script>
+<script src="aidbg.js"></script>
+<script src="tooling.js"></script>
+<script src="classrank.js"></script>
+<script src="pages.js"></script>
+<script src="daily.js"></script>
+<script src="native.js"></script>
+</body>
+</html>

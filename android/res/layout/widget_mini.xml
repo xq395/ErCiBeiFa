@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/m_root" android:layout_width="match_parent" android:layout_height="match_parent">
+    <ImageView android:layout_width="match_parent" android:layout_height="match_parent"
+        android:src="@drawable/widget_bg" android:scaleType="fitXY" />
+    <TextView android:id="@+id/m_text" android:layout_width="match_parent" android:layout_height="match_parent"
+        android:gravity="center" android:padding="8dp" android:text="北伐打卡"
+        android:textColor="#E0A84F" android:textSize="16sp" android:textStyle="bold" />
+</FrameLayout>

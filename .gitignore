@@ -1,0 +1,15 @@
+# 本机数据和构建产物，绝不提交
+data/
+dist/
+__pycache__/
+*.pyc
+*.keystore
+*.jks
+*.apk
+*.log
+.env
+.DS_Store
+Thumbs.db
+
+# GitHub Actions 生成 update 分支用的临时目录
+.update-branch/
