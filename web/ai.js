@@ -1,12 +1,37 @@
 'use strict';
-/* ---------- DeepSeek：浏览器直连 api.deepseek.com，不经过电脑 ---------- */
+/* ---------- AI 服务商：浏览器直连各家 OpenAI 兼容接口（DeepSeek、Yapi 等），不经过电脑 ---------- */
+// 服务商列表存在 beifa.providers（只在本机，含 Key）；当前选中的是 beifa.provider 和 beifa.model。
+// 老版本只有 DeepSeek，它的 Key 在 beifa.dskey、模型在 beifa.dsmodel，这里仍然认，升级后不用重填。
+const DEEPSEEK = { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', models: [
+  { id: 'deepseek-flash', vision: false }, { id: 'deepseek-v4-pro', vision: false }] };
 const AI = {
-  key: () => localStorage.getItem('beifa.dskey') || '',
-  model: () => localStorage.getItem('beifa.dsmodel') || 'deepseek-flash',
+  providers() {
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem('beifa.providers') || '[]'); } catch (e) { list = []; }
+    const ds = list.find(p => p.id === 'deepseek');
+    if (!ds && localStorage.getItem('beifa.dskey')) list.unshift({ ...DEEPSEEK, apiKey: localStorage.getItem('beifa.dskey') });
+    return list;
+  },
+  // 当前服务商：没选过就用第一个（DeepSeek 老用户就是 DeepSeek）
+  cur() {
+    const list = this.providers();
+    const id = localStorage.getItem('beifa.provider');
+    const p = list.find(x => x.id === id) || list[0] || { ...DEEPSEEK, apiKey: '' };
+    const models = p.models || [];
+    const wanted = localStorage.getItem('beifa.model') || (p.id === 'deepseek' ? localStorage.getItem('beifa.dsmodel') : '');
+    const m = models.find(x => x.id === wanted) || models[0] || { id: 'deepseek-flash', vision: false };
+    return { id: p.id, name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey || '', model: m.id, vision: !!m.vision, models };
+  },
+  key: () => AI.cur().apiKey,
+  model: () => AI.cur().model,
   async fetchKey() {
-    const c = await Sync.call('api/config');
-    if (c.deepseek_key) localStorage.setItem('beifa.dskey', c.deepseek_key);
-    if (c.deepseek_model) localStorage.setItem('beifa.dsmodel', c.deepseek_model);
+    // 从电脑拿服务商列表（含 Key）。电脑没配 providers_file 时只有 DeepSeek
+    const r = await Sync.call('api/providers');
+    const list = (r.providers || []).filter(p => p.apiKey);
+    if (list.length) localStorage.setItem('beifa.providers', JSON.stringify(list));
+    const ds = list.find(p => p.id === 'deepseek');
+    if (ds) localStorage.setItem('beifa.dskey', ds.apiKey);
+    if (!localStorage.getItem('beifa.provider') && list.length) localStorage.setItem('beifa.provider', list[0].id);
   },
   async chat(system, user, maxTokens = 4000) {
     const m = await this.raw([{ role: 'system', content: system }, { role: 'user', content: user }], null, maxTokens);
@@ -15,23 +40,25 @@ const AI = {
     return text;
   },
   async raw(messages, tools, maxTokens = 4000, model, onDelta) {
-    if (!this.key()) throw new Error('还没填 DeepSeek API Key（设置页）');
+    const cur = this.cur();
+    if (!cur.apiKey) throw new Error('还没填 API Key（设置页）');
     if (!navigator.onLine) throw new Error('没联网');
     const ctl = new AbortController();
     let timer = setTimeout(() => ctl.abort(), 120000);
     const kick = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), 120000); };
     try {
-      const r = await fetch('https://api.deepseek.com/chat/completions', {
+      const r = await fetch(cur.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
         method: 'POST', signal: ctl.signal,
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + this.key() },
-        body: JSON.stringify({ model: model || this.model(), max_tokens: maxTokens, temperature: 0.5, reasoning_effort: 'low',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cur.apiKey },
+        body: JSON.stringify({ model: model || cur.model, max_tokens: maxTokens, temperature: 0.5,
+          ...(cur.id === 'deepseek' ? { reasoning_effort: 'low' } : {}),
           messages, ...(tools ? { tools } : {}), ...(onDelta ? { stream: true } : {}) }),
       });
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));
-        if (r.status === 401) throw new Error('API Key 无效');
-        if (r.status === 402) throw new Error('DeepSeek 余额不足');
-        throw new Error((j.error && j.error.message) || 'DeepSeek 返回 ' + r.status);
+        if (r.status === 401) throw new Error(cur.name + ' 的 Key 无效');
+        if (r.status === 402) throw new Error(cur.name + ' 余额不足');
+        throw new Error((j.error && j.error.message) || cur.name + ' 返回 ' + r.status);
       }
       if (onDelta) return await this._readStream(r, onDelta, kick);
       const j = await r.json().catch(() => ({}));

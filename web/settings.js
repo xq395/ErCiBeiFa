@@ -4,15 +4,21 @@ function renderSet() {
   const s = set(), synced = +localStorage.getItem('beifa.synced') || 0, tt = ttData();
   const exported = +localStorage.getItem('beifa.exported') || 0;
   $('#tab-set').innerHTML = memCard() + updateCard() + `
-    <div class="card"><h3>DeepSeek</h3>
-    <div class="dim">手机直接连 DeepSeek，不需要电脑开着。Key 只存在这台设备上，导出的备份文件不含 Key。</div>
+    <div class="card"><h3>AI 服务商</h3>
+    <div class="dim">手机直接连服务商，不需要电脑开着。Key 只存在这台设备上，导出的备份文件不含 Key。</div>
+    <label>服务商</label><select id="sProv" data-prev="${esc(AI.cur().id)}">${AI.providers().map(p =>
+      `<option value="${esc(p.id)}" ${p.id === AI.cur().id ? 'selected' : ''}>${esc(p.name)}</option>`).join('') || '<option value="">（没有可用服务商）</option>'}</select>
     <label>API Key</label><input id="sKey" type="password" autocomplete="off" placeholder="sk-..." value="${esc(AI.key())}">
-    <div class="dim">识图固定用 deepseek-flash（pro 目前不支持图片）。</div>
-    <label>模型</label><select id="sModel">${['deepseek-flash', 'deepseek-v4-pro'].map(m =>
-      `<option ${m === AI.model() ? 'selected' : ''}>${m}</option>`).join('')}</select>
-    <div class="dim">flash 快、便宜，日常够用；pro 推理更强。</div>
+    <label>模型</label><select id="sModel">${AI.cur().models.map(m =>
+      `<option value="${esc(m.id)}" ${m.id === AI.model() ? 'selected' : ''}>${esc(m.id)}${m.vision ? '（识图）' : ''}</option>`).join('')}</select>
+    <div class="dim">${AI.cur().vision ? '这个模型支持图片。' : '这个模型不支持图片；识图会改用 DeepSeek 的 deepseek-flash（需要 DeepSeek Key）。'}</div>
     <div class="btns" style="margin-top:10px"><button class="primary" id="sKeySave">保存</button><button id="sKeyTest">测试</button>
       ${Sync.server() && Sync.pin() ? '<button id="sKeyPull">从电脑获取</button>' : ''}</div></div>
+
+    <div class="card"><h3>存档（跨设备）</h3>
+    <div class="dim">把这台设备的打卡、对话、课时、目标等记录存到电脑，新设备上点"从电脑恢复"就能拿到。按每条记录的修改时间合并，不会覆盖新设备上已有的记录。知识库正文会在恢复后自动补齐。Key 不进存档。</div>
+    <div class="btns" style="margin-top:10px"><button class="primary" id="archUp">上传存档到电脑</button><button id="archDown">从电脑恢复存档</button></div>
+    <div class="dim" style="margin-top:6px">需要先在下面"和电脑合并"里填好电脑地址和 PIN。上次上传：${+localStorage.getItem('beifa.archUp') ? new Date(+localStorage.getItem('beifa.archUp')).toLocaleString() : '从未'}</div></div>
 
     <div class="card"><h3>数据：导入 / 导出</h3>
     <div class="dim">平时只在手机上用。要和电脑交换数据，二选一：<br>
@@ -50,9 +56,18 @@ function renderSet() {
     <div class="btns" style="margin-top:12px"><button class="primary" id="sSave">保存</button></div></div>
     ${typeof diagCard === 'function' ? diagCard() : ''}`;
 }
+// 保存当前服务商的 Key 和模型。DeepSeek 同时写老的 beifa.dskey / beifa.dsmodel，保持兼容。
 function saveKeyFields() {
-  localStorage.setItem('beifa.dskey', $('#sKey').value.trim());
-  localStorage.setItem('beifa.dsmodel', $('#sModel').value);
+  const provId = $('#sProv') ? $('#sProv').value : AI.cur().id;
+  const key = $('#sKey').value.trim(), model = $('#sModel').value;
+  const list = AI.providers().map(p => (p.id === provId ? { ...p, apiKey: key } : p));
+  localStorage.setItem('beifa.providers', JSON.stringify(list));
+  localStorage.setItem('beifa.provider', provId);
+  localStorage.setItem('beifa.model', model);
+  if (provId === 'deepseek') {
+    localStorage.setItem('beifa.dskey', key);
+    localStorage.setItem('beifa.dsmodel', model);
+  }
 }
 function saveSyncFields() {
   const srv = $('#sSrv').value.trim();
@@ -81,6 +96,31 @@ $('#tab-set').addEventListener('click', async e => {
   else if (id === 'ttImp') $('#ttFile').click();
   else if (id === 'sAuto') saveSyncFields();
   else if (id === 'sSync') { saveSyncFields(); await Sync.run('both', true); renderSet(); }
+  else if (id === 'archUp' || id === 'archDown') {
+    saveSyncFields();
+    if (!Sync.server() || !Sync.pin()) { toast('先填电脑地址和 PIN'); return; }
+    const old = b.textContent; b.disabled = true; b.textContent = id === 'archUp' ? '上传中…' : '恢复中…';
+    try {
+      if (id === 'archUp') {
+        const payload = { data: S };
+        // Key 存在 beifa.dskey 等独立键里，不在 S 中；这里再确认一次，防止以后有人把它放进 S
+        if (/sk-[A-Za-z0-9]{10,}/.test(JSON.stringify(payload))) throw new Error('存档里有疑似 Key，已取消上传');
+        const r = await Sync.call('api/archive', payload);
+        localStorage.setItem('beifa.archUp', Date.now());
+        toast('已上传存档：' + Object.entries(r.counts).map(([k, n]) => k + ' ' + n).join('，'));
+      } else {
+        const r = await Sync.call('api/archive');
+        S = mergeState(S, r.data);
+        localStorage.setItem(KEY, JSON.stringify(S));
+        localStorage.setItem('beifa.synced', Date.now());
+        toast('已从电脑恢复存档，正在补齐知识库正文');
+        if (window.DocSync) setTimeout(() => window.DocSync.run(false), 300);
+      }
+      renderSet();
+      if (typeof render === 'function') render();
+    } catch (err) { toast(err.message || '存档失败'); }
+    finally { b.disabled = false; b.textContent = old; }
+  }
   else if (id === 'sDocSync') {
     saveSyncFields();
     if (!window.DocSync) { toast('页面还没加载完，稍后再试'); return; }
@@ -104,6 +144,18 @@ $('#tab-set').addEventListener('click', async e => {
   }
 });
 $('#tab-set').addEventListener('change', async e => {
+  if (e.target.id === 'sProv') {
+    // 切换前把输入框里的 Key 存到原来的服务商名下，不然没点保存就丢了
+    const prev = e.target.dataset.prev || AI.cur().id;
+    const key = $('#sKey').value.trim();
+    const list = AI.providers().map(p => (p.id === prev ? { ...p, apiKey: key } : p));
+    localStorage.setItem('beifa.providers', JSON.stringify(list));
+    if (prev === 'deepseek') localStorage.setItem('beifa.dskey', key);
+    localStorage.setItem('beifa.provider', e.target.value);
+    localStorage.removeItem('beifa.model');
+    renderSet();
+    return;
+  }
   const f = e.target.files && e.target.files[0];
   if (!f) return;
   try {

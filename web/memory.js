@@ -154,12 +154,24 @@ Object.assign(TOOLS, {
 });
 Object.assign(TOOL_LABEL, { remember: '记住', update_memory: '修改记忆', forget: '删除记忆', view_image: '重新看图' });
 
-/* 识图：只有 deepseek-flash 支持图片输入，发图时固定用它 */
-const VISION_MODEL = 'deepseek-flash';
+/* 识图：当前模型支持图片就用它；不支持就回退到 DeepSeek 的 deepseek-flash（需要 DeepSeek Key） */
 AI.vision = async function (question, dataUrl) {
-  const m = await AI.raw([{ role: 'user', content: [{ type: 'text', text: question }, { type: 'image_url', image_url: { url: dataUrl } }] }],
-    null, 3000, VISION_MODEL);
-  return (m.content || '').trim();
+  const cur = AI.cur();
+  const content = [{ type: 'text', text: question }, { type: 'image_url', image_url: { url: dataUrl } }];
+  if (cur.vision) {
+    const m = await AI.raw([{ role: 'user', content }], null, 3000);
+    return (m.content || '').trim();
+  }
+  const ds = AI.providers().find(p => p.id === 'deepseek');
+  if (!ds || !ds.apiKey) throw new Error('当前模型不支持图片，识图需要 DeepSeek Key（设置页）');
+  const r = await fetch(ds.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + ds.apiKey },
+    body: JSON.stringify({ model: 'deepseek-flash', max_tokens: 3000, temperature: 0.5, messages: [{ role: 'user', content }] }),
+  });
+  if (!r.ok) throw new Error('DeepSeek 识图返回 ' + r.status);
+  const j = await r.json();
+  return ((j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '').trim();
 };
 
 /* 设置页：长期记忆管理 */

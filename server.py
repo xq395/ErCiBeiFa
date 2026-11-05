@@ -91,6 +91,51 @@ def config():
     return conf
 
 
+def providers():
+    """服务商列表：DeepSeek（config.json 里的 deepseek_key）+ config.json 里 providers_file 指向的文件。
+    providers_file 是 ZCode 的 provider_config.json，格式：config.providerConfigRules.providerRules
+    （各站点的 baseUrl 和 apiKey）、config.modelConfigRules.providerModelRules（模型和 supportsImage）。
+    不在代码里写死路径，换电脑也不用改。"""
+    out = []
+    conf = config()
+    if conf.get('deepseek_key'):
+        out.append({'id': 'deepseek', 'name': 'DeepSeek', 'baseUrl': 'https://api.deepseek.com',
+                    'apiKey': conf['deepseek_key'], 'models': [
+                        {'id': 'deepseek-flash', 'vision': False}, {'id': 'deepseek-v4-pro', 'vision': False}]})
+    pf = conf.get('providers_file')
+    if not pf:
+        return out
+    try:
+        raw = json.loads(Path(pf).read_text(encoding='utf-8'))
+        cfg = raw.get('config') or {}
+        prules = (cfg.get('providerConfigRules') or {}).get('providerRules') or []
+        mrules = (cfg.get('modelConfigRules') or {}).get('providerModelRules') or []
+    except (OSError, ValueError):
+        return out
+    by_provider = {}
+    for r in mrules:
+        props = (r.get('config') or {}).get('properties') or {}
+        vision = bool((props.get('inputFormat') or {}).get('supportsImage'))
+        by_provider.setdefault(r.get('providerId'), []).append({'id': r.get('modelId'), 'vision': vision})
+    for pr in prules:
+        pc = pr.get('config') or {}
+        api, access = pc.get('api') or {}, pc.get('access') or {}
+        base = api.get('baseUrl') or ''
+        key = access.get('apiKey') or ''
+        if not base or not key or pr.get('enabled') is False:
+            continue
+        pid = pr.get('providerId')
+        if any(o['id'] == pid for o in out):
+            continue
+        models = by_provider.get(pid) or []
+        # modelOrder 决定显示顺序；没有就按规则里的顺序
+        order = pc.get('modelOrder') or []
+        ids = {m['id']: m for m in models}
+        models = [ids[i] for i in order if i in ids] + [m for m in models if m['id'] not in order]
+        out.append({'id': pid, 'name': pr.get('providerName') or pid, 'baseUrl': base, 'apiKey': key, 'models': models})
+    return out
+
+
 def lan_ips():
     ips = set()
     try:
@@ -176,6 +221,20 @@ class Handler(SimpleHTTPRequestHandler):
             return
         # 知识库正文：先取清单（只有 id），再按需取单篇
         p = urlparse(self.path)
+        if p.path == '/api/providers':
+            # 服务商和 Key：只给带 PIN 的设备，Key 只存在手机本机 localStorage
+            if not self.authed():
+                return
+            self.reply(200, {'app': 'beifa', 'providers': providers()})
+            return
+        if p.path == '/api/archive':
+            # 存档下载：整份 data.json（不含 Key，不含 KB 正文，正文按文档单独同步）
+            if not self.authed():
+                return
+            with LOCK:
+                data = load_json(DATA, empty())
+            self.reply(200, {'app': 'beifa', 'ts': int(time.time() * 1000), 'data': data})
+            return
         if p.path == '/api/docs':
             if not self.authed():
                 return
@@ -235,6 +294,30 @@ class Handler(SimpleHTTPRequestHandler):
             (DATA_DIR / 'diag.json').write_text(body, encoding='utf-8')
             sys.stderr.write('自检结果：' + body + '\n')
             self.reply(200, {'ok': True})
+            return
+        if urlparse(self.path).path == '/api/archive':
+            # 存档上传：和 /api/sync 一样是合并，不覆盖电脑上有、手机上没有的记录
+            if not self.authed():
+                return
+            n = int(self.headers.get('Content-Length') or 0)
+            if n <= 0 or n > MAX_BODY:
+                self.reply(400, {'error': 'body size'})
+                return
+            try:
+                incoming = json.loads(self.rfile.read(n))
+                if not isinstance(incoming, dict) or not isinstance(incoming.get('data'), dict):
+                    raise ValueError
+            except ValueError:
+                self.reply(400, {'error': 'bad archive'})
+                return
+            with LOCK:
+                current = load_json(DATA, empty())
+                merged = merge(current, incoming['data'])
+                snap = BACKUPS / f'{date.today().isoformat()}.json'
+                if DATA.exists() and not snap.exists():
+                    snap.write_text(DATA.read_text(encoding='utf-8'), encoding='utf-8')
+                save_json(DATA, merged)
+            self.reply(200, {'ok': True, 'counts': {k: len(merged.get(k) or {}) for k in COLLECTIONS}})
             return
         if urlparse(self.path).path == '/api/doc':
             if not self.authed():

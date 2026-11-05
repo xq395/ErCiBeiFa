@@ -35,25 +35,27 @@ AI.raw = function (messages, tools, maxTokens, model, onDelta) {
 async function _rawWith(messages, tools, maxTokens = 4000, model, c, onDelta) {
   if (!c) return _raw(messages, tools, maxTokens, model, onDelta);
   // 带工具 = 管家对话：用对话设置里的温度和思考强度
-  if (!AI.key()) throw new Error('还没填 DeepSeek API Key（设置页）');
+  const cur = AI.cur();
+  if (!cur.apiKey) throw new Error('还没填 API Key（设置页）');
   if (!navigator.onLine) throw new Error('没联网');
   const ctl = new AbortController();
   let timer = setTimeout(() => ctl.abort(), 120000);
   const kick = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), 120000); };
   try {
-    if (window.AIDBG) AIDBG.round({ model: model || AI.model(), temperature: c.temp, effort: c.effort,
+    if (window.AIDBG) AIDBG.round({ provider: cur.id, model: model || cur.model, temperature: c.temp, effort: c.effort,
       stream: !!onDelta, messages: messages.length, tools: (tools || []).map(t => t.function.name) });
-    const r = await fetch('https://api.deepseek.com/chat/completions', {
+    const r = await fetch(cur.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
       method: 'POST', signal: ctl.signal,
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + AI.key() },
-      body: JSON.stringify({ model: model || AI.model(), max_tokens: maxTokens, temperature: c.temp, reasoning_effort: c.effort,
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cur.apiKey },
+      body: JSON.stringify({ model: model || cur.model, max_tokens: maxTokens, temperature: c.temp,
+        ...(cur.id === 'deepseek' ? { reasoning_effort: c.effort } : {}),
         messages, ...(tools && tools.length ? { tools } : {}), ...(onDelta ? { stream: true } : {}) }),
     });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
-      if (r.status === 401) throw new Error('API Key 无效');
-      if (r.status === 402) throw new Error('DeepSeek 余额不足');
-      throw new Error((j.error && j.error.message) || 'DeepSeek 返回 ' + r.status);
+      if (r.status === 401) throw new Error(cur.name + ' 的 Key 无效');
+      if (r.status === 402) throw new Error(cur.name + ' 余额不足');
+      throw new Error((j.error && j.error.message) || cur.name + ' 返回 ' + r.status);
     }
     if (onDelta) return await AI._readStream(r, onDelta, kick);
     const j = await r.json().catch(() => ({}));
@@ -111,7 +113,7 @@ function chatCtlHTML() {
   } else {
     body = `<div class="grid2">
       <div><label>模型</label><select id="ccModel"><option value="">跟随设置页（${esc(AI.model())}）</option>
-        ${['deepseek-flash', 'deepseek-v4-pro'].map(m => `<option ${c.model === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
+        ${AI.cur().models.map(m => `<option value="${esc(m.id)}" ${c.model === m.id ? 'selected' : ''}>${esc(m.id)}</option>`).join('')}</select></div>
       <div><label>思考强度</label><select id="ccEffort">${['low', 'high', 'max'].map(m => `<option ${c.effort === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
       <div><label>温度 <span class="dim" id="ccTempV">${c.temp}</span></label><input id="ccTemp" type="range" min="0" max="1.5" step="0.1" value="${c.temp}"></div>
       <div><label>上下文条数</label><input id="ccN" type="number" min="4" max="200" value="${c.ctxN}"></div></div>
