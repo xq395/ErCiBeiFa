@@ -179,10 +179,21 @@ async function lessonGuide(key, force) {
   return text;
 }
 
-/* 很轻的 Markdown 渲染：标题、粗体、列表、换行；$...$ / $$...$$ / \(...\) / \[...\] 交给 KaTeX */
+/* Markdown 渲染：标题、粗体/斜体、行内代码、代码块、列表、表格、引用、链接、分隔线；
+   $...$ / $$...$$ / \(...\) / \[...\] 交给 KaTeX。先整体转义再识别结构，模型输出不会变成 HTML。
+   流式时代码块可能还没闭合，未闭合的 ``` 也按代码块显示到末尾。 */
 function md(s) {
   s = String(s ?? '');
-  const blocks = [];
+  const blocks = [], codes = [];
+  // 代码先藏起来，里面的 $ 和 * 不参与公式/粗体识别
+  s = s.replace(/```[^\n]*\n([\s\S]*?)(```|$)/g, (m, body) => {
+    codes.push(`<pre class="mdcode"><code>${esc(body.replace(/\n$/, ''))}</code></pre>`);
+    return `\n@@CODE${codes.length - 1}@@\n`;
+  });
+  s = s.replace(/`([^`\n]+)`/g, (m, body) => {
+    codes.push(`<code class="mdic">${esc(body)}</code>`);
+    return `@@CODE${codes.length - 1}@@`;
+  });
   s = s.replace(/\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]/g, (m, a, b) => {
     blocks.push({ tex: a != null ? a : b, display: true });
     return `@@KTX${blocks.length - 1}@@`;
@@ -191,11 +202,56 @@ function md(s) {
     blocks.push({ tex: a != null ? a : b, display: false });
     return `@@KTX${blocks.length - 1}@@`;
   });
-  let h = esc(s)
-    .replace(/^#{1,4}\s*(.+)$/gm, '<b>$1</b>')
+  const inline = t => esc(t)
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-    .replace(/^\s*[-*]\s+/gm, '• ')
-    .replace(/\n/g, '<br>');
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>');
+  const lines = s.split('\n');
+  const isTableSep = l => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l);
+  const cells = l => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+  const startsBlock = (l, k) => /^\s*(#{1,4}\s|[-*+]\s|\d+[.)]\s|>|---+\s*$|@@CODE\d+@@\s*$)/.test(l)
+    || (l.includes('|') && k + 1 < lines.length && isTableSep(lines[k + 1]));
+  let out = '', i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (/^\s*$/.test(l)) { i++; continue; }
+    if (/^\s*@@CODE\d+@@\s*$/.test(l)) { out += l.trim(); i++; continue; }
+    if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(l)) { out += '<hr>'; i++; continue; }
+    const hd = l.match(/^\s*(#{1,4})\s+(.+)$/);
+    if (hd) { out += `<div class="mdh">${inline(hd[2])}</div>`; i++; continue; }
+    if (/^\s*>\s?/.test(l)) {
+      const q = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) q.push(lines[i++].replace(/^\s*>\s?/, ''));
+      out += `<blockquote>${inline(q.join('\n')).replace(/\n/g, '<br>')}</blockquote>`;
+      continue;
+    }
+    if (l.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      const head = cells(l);
+      i += 2;
+      let rows = '';
+      while (i < lines.length && lines[i].includes('|') && !/^\s*$/.test(lines[i])) {
+        rows += '<tr>' + cells(lines[i++]).map(c => `<td>${inline(c)}</td>`).join('') + '</tr>';
+      }
+      out += `<div class="mdtbl"><table><thead><tr>${head.map(c => `<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
+      continue;
+    }
+    if (/^\s*[-*+]\s+/.test(l)) {
+      let items = '';
+      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) items += `<li>${inline(lines[i++].replace(/^\s*[-*+]\s+/, ''))}</li>`;
+      out += `<ul>${items}</ul>`;
+      continue;
+    }
+    if (/^\s*\d+[.)]\s+/.test(l)) {
+      let items = '';
+      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) items += `<li>${inline(lines[i++].replace(/^\s*\d+[.)]\s+/, ''))}</li>`;
+      out += `<ol>${items}</ol>`;
+      continue;
+    }
+    const para = [lines[i++]];
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !startsBlock(lines[i])) para.push(lines[i++]);
+    out += `<p>${inline(para.join('\n')).replace(/\n/g, '<br>')}</p>`;
+  }
+  let h = out;
   if (blocks.length) {
     h = h.replace(/@@KTX(\d+)@@/g, (m, i) => {
       const b = blocks[+i];
@@ -203,7 +259,7 @@ function md(s) {
     });
     if (typeof scheduleMath === 'function') scheduleMath();
   }
-  return h;
+  return h.replace(/@@CODE(\d+)@@/g, (m, i) => codes[+i]);
 }
 
 async function runAI(btn, fn) {

@@ -42,8 +42,10 @@ jobs:
       - name: 整理 update 分支文件
         run: python tools/make_update_branch.py
 
-      - name: 验证更新链路
-        run: node tools/test_update.js
+      - name: 验证更新链路与 Markdown 渲染
+        run: |
+          node tools/test_update.js
+          node tools/test_md.js
 
       - name: 发布到 update 分支
         env:

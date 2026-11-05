@@ -227,7 +227,7 @@ const Chat = {
           (full, delta, reasoning) => {
             Chat.live = full;
             Chat.reasoning = reasoning || '';
-            if (!Chat.liveT) Chat.liveT = setTimeout(() => { Chat.liveT = null; onStep(); }, 80);
+            if (!Chat.liveT) Chat.liveT = setTimeout(() => { Chat.liveT = null; paintLive(); }, 80);
           });
         if (Chat.liveT) { clearTimeout(Chat.liveT); Chat.liveT = null; }
         Chat.live = ''; Chat.reasoning = '';
@@ -269,18 +269,42 @@ const TOOL_LABEL = {
   add_study_log: '补记时长', delete_study_log: '删除记录', update_day: '修改结算',
   update_settings: '修改规则', generate_lesson_card: '生成讲义',
 };
-function liveBubble() {
-  const r = Chat.reasoning || '', c = Chat.live || '';
-  const n = r.length;
-  const sz = n > 999 ? (n / 1000).toFixed(1) + 'k' : String(n);
-  let h = '';
-  if (r || !c) {
-    const head = c ? `思考过程（${sz} 字）` : `思考中… 点开看过程（${sz} 字）`;
-    h += `<button type="button" class="thinkbtn" data-think>${head} <span>${Chat.thinkOpen ? '▴' : '▾'}</span></button>`;
-    if (Chat.thinkOpen && r) h += `<div class="thinkbody">${esc(r).replace(/\n/g, '<br>')}</div>`;
+// 流式气泡：按钮、思考框、正文各有固定节点，只改文字和开关，不整块重建，所以展开位置和滚动不跳。
+function liveParts(el) {
+  if (!el.querySelector('[data-part=btn]')) {
+    el.innerHTML = '<button type="button" class="thinkbtn" data-think data-part="btn"></button>'
+      + '<div class="thinkbody" data-part="body" hidden></div><div class="msg bot" data-part="msg"></div>';
   }
-  if (c) h += `<div class="msg bot streaming">${esc(c).replace(/\n/g, '<br>')}<span class="caret">▍</span></div>`;
-  return h || '<div class="msg bot dim">思考中…</div>';
+  return { btn: el.querySelector('[data-part=btn]'), body: el.querySelector('[data-part=body]'), msg: el.querySelector('[data-part=msg]') };
+}
+function paintLive() {
+  const box = $('#chatLog');
+  if (!box) return;
+  let el = $('#chatLive');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'chatLive';
+    el.className = 'chatlive';
+    box.appendChild(el);
+  }
+  const r = Chat.reasoning || '', c = Chat.live || '';
+  const sz = r.length > 999 ? (r.length / 1000).toFixed(1) + 'k' : String(r.length);
+  const { btn, body, msg } = liveParts(el);
+  const head = c ? `思考过程（${sz} 字）` : `思考中… 点开看过程（${sz} 字）`;
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const show = !!(r || !c);
+  btn.hidden = !show;
+  btn.textContent = show ? `${head} ${Chat.thinkOpen ? '▴' : '▾'}` : '';
+  body.hidden = !(show && Chat.thinkOpen && r);
+  if (!body.hidden && body.textContent !== r) body.textContent = r;
+  msg.hidden = !c;
+  if (c) {
+    const html = md(c) + '<span class="caret">▍</span>';
+    if (msg.dataset.h !== html) { msg.innerHTML = html; msg.dataset.h = html; }
+  }
+  if (!c && !r) { msg.hidden = false; msg.className = 'msg bot dim'; msg.textContent = '思考中…'; }
+  else msg.className = 'msg bot streaming';
+  if (nearBottom) box.scrollTop = box.scrollHeight;
 }
 function renderChat() {
   const box = $('#chatLog');
@@ -302,8 +326,9 @@ function renderChat() {
       if (m.content) h += `<div class="msg bot">${md(m.content)}</div>`;
     }
   }
-  if (Chat.busy) h += liveBubble();
+  if (Chat.busy) h += '<div id="chatLive" class="chatlive"></div>';
   box.innerHTML = h;
+  if (Chat.busy) paintLive();
   box.querySelectorAll('img[data-img]').forEach(async el => {
     const u = await Img.get(el.dataset.img).catch(() => null);
     if (u) el.src = u;
@@ -399,7 +424,11 @@ document.addEventListener('paste', async e => {
   pendingImgs.push(await Img.fromFile(f)); renderPend(); toast('图片已附上');
 });
 document.addEventListener('click', e => {
-  if (e.target.closest && e.target.closest('[data-think]')) { Chat.thinkOpen = !Chat.thinkOpen; renderChat(); return; }
+  if (e.target.closest && e.target.closest('[data-think]')) {
+    Chat.thinkOpen = !Chat.thinkOpen;
+    if (Chat.busy) paintLive(); else renderChat();
+    return;
+  }
   if (e.target.dataset && e.target.dataset.quick != null && !Chat.busy) {
     const q = QUICK[+e.target.dataset.quick];
     

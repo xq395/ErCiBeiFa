@@ -65,8 +65,9 @@ renderChat = function () {
         ${wasUndone ? '<span class="dim">已撤销改动</span>' : ''}</div>`;
     }
   }
-  if (Chat.busy) h += liveBubble();
+  if (Chat.busy) h += '<div id="chatLive" class="chatlive"></div>';
   box.innerHTML = h;
+  if (Chat.busy) paintLive();
   box.querySelectorAll('img[data-img]').forEach(async el => {
     const u = await Img.get(el.dataset.img).catch(() => null);
     if (u) el.src = u;
