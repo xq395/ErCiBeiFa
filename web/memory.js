@@ -154,12 +154,15 @@ Object.assign(TOOLS, {
 });
 Object.assign(TOOL_LABEL, { remember: '记住', update_memory: '修改记忆', forget: '删除记忆', view_image: '重新看图' });
 
-/* 识图：当前模型支持图片就用它；不支持就回退到 DeepSeek 的 deepseek-flash（需要 DeepSeek Key） */
+/* 识图：当前模型支持图片就用它；不支持就回退到 DeepSeek 的 deepseek-flash（需要 DeepSeek Key）。
+   DeepSeek 默认推理很重，不设 reasoning_effort 时 3000 token 会全被推理占掉，正文为空；
+   公式密集的题图转写要 2000 字以上，所以上限给到 8000。 */
+const VISION_MAX_TOKENS = 8000;
 AI.vision = async function (question, dataUrl) {
   const cur = AI.cur();
   const content = [{ type: 'text', text: question }, { type: 'image_url', image_url: { url: dataUrl } }];
   if (cur.vision) {
-    const m = await AI.raw([{ role: 'user', content }], null, 3000);
+    const m = await AI.raw([{ role: 'user', content }], null, VISION_MAX_TOKENS);
     return (m.content || '').trim();
   }
   const ds = AI.providers().find(p => p.id === 'deepseek');
@@ -167,11 +170,13 @@ AI.vision = async function (question, dataUrl) {
   const r = await fetch(ds.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + ds.apiKey },
-    body: JSON.stringify({ model: 'deepseek-flash', max_tokens: 3000, temperature: 0.5, messages: [{ role: 'user', content }] }),
+    body: JSON.stringify({ model: 'deepseek-flash', max_tokens: VISION_MAX_TOKENS, temperature: 0.5, reasoning_effort: 'low', messages: [{ role: 'user', content }] }),
   });
   if (!r.ok) throw new Error('DeepSeek 识图返回 ' + r.status);
   const j = await r.json();
-  return ((j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '').trim();
+  const c = j.choices && j.choices[0];
+  if (c && c.finish_reason === 'length' && !(c.message && c.message.content)) throw new Error('识图输出被截断（图太复杂），再试一次或改小图');
+  return ((c && c.message && c.message.content) || '').trim();
 };
 
 /* 设置页：长期记忆管理 */
