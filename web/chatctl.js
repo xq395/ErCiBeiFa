@@ -1,7 +1,8 @@
 'use strict';
 /* ---------- 对话设置：查看 / 修改上下文、提示词、参数、权限 ---------- */
-// 存在 S.settings.chat（随备份同步）：{ ctxN, temp, model, effort, sysExtra, sysOverride, perm: 'full'|'read' }
-const CHAT_DEFAULT = { ctxN: 30, temp: 0.5, model: '', effort: 'low', sysExtra: '', sysOverride: '', perm: 'full' };
+// 存在 S.settings.chat（随备份同步）：{ ctxN, temp, sysExtra, sysOverride, perm: 'full'|'read' }
+// 模型在管家标题栏实时切换；思考强度固定低，输出上限交给 32K 预算和自动续写。
+const CHAT_DEFAULT = { ctxN: 30, temp: 0.5, sysExtra: '', sysOverride: '', perm: 'full' };
 const cset = () => ({ ...CHAT_DEFAULT, ...(set().chat || {}) });
 function setChat(patch) {
   S.settings = { ...S.settings, chat: { ...cset(), ...patch }, ts: Date.now() };
@@ -25,16 +26,16 @@ AGENT_SYS = function () {
   return s;
 };
 
-// 只读模式：写工具直接返回错误；模型、温度、思考强度、上下文条数跟随设置
+// 只读模式：写工具直接返回错误；温度、上下文条数跟随设置，模型用标题栏选中的那个
 const _raw = AI.raw.bind(AI);
 AI.raw = function (messages, tools, maxTokens, model, onDelta) {
   const c = cset();
   if (tools && c.perm === 'read') tools = tools.filter(t => !TOOLS[t.function.name] || !TOOLS[t.function.name].write);
-  return _rawWith(messages, tools, maxTokens, model || (tools ? c.model : '') || undefined, tools ? c : null, onDelta);
+  return _rawWith(messages, tools, maxTokens, model || undefined, tools ? c : null, onDelta);
 };
 async function _rawWith(messages, tools, maxTokens = 16000, model, c, onDelta) {
   if (!c) return _raw(messages, tools, maxTokens, model, onDelta);
-  // 带工具 = 管家对话：用对话设置里的温度和思考强度
+  // 带工具 = 管家对话：用对话设置里的温度和上下文条数
   const cur = AI.cur();
   if (!cur.apiKey) throw new Error('还没填 API Key（设置页）');
   if (!navigator.onLine) throw new Error('没联网');
@@ -42,10 +43,10 @@ async function _rawWith(messages, tools, maxTokens = 16000, model, c, onDelta) {
   let timer = setTimeout(() => ctl.abort(), 180000);
   const kick = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), 180000); };
   try {
-    if (window.AIDBG) AIDBG.round({ provider: cur.id, model: model || cur.model, temperature: c.temp, effort: c.effort,
+    if (window.AIDBG) AIDBG.round({ provider: cur.id, model: model || cur.model, temperature: c.temp, effort: 'low',
       stream: !!onDelta, messages: messages.length, tools: (tools || []).map(t => t.function.name) });
     const r = await AI._chat({ model: model || cur.model, max_tokens: maxTokens, temperature: c.temp,
-      ...(cur.id === 'deepseek' ? { reasoning_effort: c.effort } : {}),
+      ...(cur.id === 'deepseek' ? { reasoning_effort: 'low' } : {}),
       messages, ...(tools && tools.length ? { tools } : {}), ...(onDelta ? { stream: true } : {}) }, ctl.signal);
     if (onDelta) return await AI._readStream(r, onDelta, kick);
     const j = await r.json().catch(() => ({}));
@@ -104,15 +105,12 @@ function chatCtlHTML() {
       <details><summary class="dim">当前实际发送的提示词（${estTok(AGENT_SYS())} tokens）</summary><pre class="syspre">${esc(AGENT_SYS())}</pre></details>`;
   } else {
     body = `<div class="grid2">
-      <div><label>模型</label><select id="ccModel"><option value="">跟随设置页（${esc(AI.model())}）</option>
-        ${AI.cur().models.map(m => `<option value="${esc(m.id)}" ${c.model === m.id ? 'selected' : ''}>${esc(m.id)}</option>`).join('')}</select></div>
-      <div><label>思考强度</label><select id="ccEffort">${['low', 'high', 'max'].map(m => `<option ${c.effort === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
       <div><label>温度 <span class="dim" id="ccTempV">${c.temp}</span></label><input id="ccTemp" type="range" min="0" max="1.5" step="0.1" value="${c.temp}"></div>
       <div><label>上下文条数</label><input id="ccN" type="number" min="4" max="200" value="${c.ctxN}"></div></div>
       <label>编辑权限</label><div class="seg">
         <button class="${c.perm === 'full' ? 'on' : ''}" data-perm="full">可以改数据和课表</button>
         <button class="${c.perm === 'read' ? 'on' : ''}" data-perm="read">只读（只回答）</button></div>
-      <div class="dim">温度低更稳、高更发散。思考强度高会慢一些、费一些 token。改动立即生效。</div>
+      <div class="dim">温度低更稳、高更发散。模型和思考强度已按长输出调好，不用再管。改动立即生效。</div>
       <div class="btns" style="margin-top:8px"><button class="mini ghost" id="ccReset">恢复默认</button></div>`;
   }
   return `<div class="chatctl"><div class="seg">${Object.entries(tabs).map(([k, v]) =>
@@ -202,10 +200,18 @@ document.addEventListener('click', async e => {
 });
 document.addEventListener('change', e => {
   const id = e.target.id;
-  if (id === 'ccModel') setChat({ model: e.target.value });
-  if (id === 'ccEffort') setChat({ effort: e.target.value });
+  if (id === 'chatModelSel') {
+    const [pid, mid] = String(e.target.value).split('|');
+    if (!pid || !mid) return;
+    localStorage.setItem('beifa.provider', pid);
+    localStorage.setItem('beifa.model', mid);
+    if (pid === 'deepseek') localStorage.setItem('beifa.dsmodel', mid);
+    setChat({ model: '' }); // 清掉旧版"按对话覆盖模型"的设置
+    toast('下一句改用 ' + mid);
+    return;
+  }
   if (id === 'ccN') setChat({ ctxN: Math.max(4, Math.min(200, +e.target.value || 30)) });
   if (id === 'ccTemp') setChat({ temp: +e.target.value });
-  if (['ccModel', 'ccEffort', 'ccN', 'ccTemp'].includes(id)) renderCtl();
+  if (['ccN', 'ccTemp'].includes(id)) renderCtl();
 });
 document.addEventListener('input', e => { if (e.target.id === 'ccTemp') $('#ccTempV').textContent = e.target.value; });

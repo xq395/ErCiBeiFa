@@ -358,9 +358,17 @@ const QUICK = [
   ['该复习什么', () => '今天有哪些课时和卡片到期该复习？挑最值得复习的 3 个，说明为什么。复习是可选的，时间不够就说可以跳过。'],
   ['本周复盘', () => '复盘最近 7 天：各科实际分钟和目标比、学完了哪些课时、哪天断了、星级低的课时。最后只给下周一条最重要的调整。不超过 250 字。'],
 ];
+// 模型实时切换：列出本机已填 Key 的所有服务商和模型，选中即用于下一句对话
+function chatModelOpts() {
+  const list = AI.providers().filter(p => p.apiKey), cur = AI.cur();
+  if (!list.length) return '<option value="">（先在设置里填 API Key）</option>';
+  return list.map(p => `<optgroup label="${esc(p.name)}">` + (p.models || []).map(m =>
+    `<option value="${esc(p.id + '|' + m.id)}" ${p.id === cur.id && m.id === cur.model ? 'selected' : ''}>${esc(m.id)}${m.vision ? '（识图）' : ''}</option>`).join('') + '</optgroup>').join('');
+}
 function chatPanel() {
-  return `<div class="card full chat"><div class="row1"><h3>管家 <span class="dim">DeepSeek</span></h3>
+  return `<div class="card full chat"><div class="row1"><h3>管家</h3>
     <span><button class="mini ghost" id="chatClear">清空</button><button class="mini ghost" id="chatDbg" title="AI 调用日志（本机）">日志</button></span></div>
+    <div class="modelbar"><span class="dim">模型</span><select id="chatModelSel" title="切换后下一句就用新模型">${chatModelOpts()}</select></div>
     <div id="chatLog" class="chatlog"></div>
     <div class="quickq">${QUICK.map((q, i) => `<button type="button" class="mini ghost" data-quick="${i}">${q[0]}</button>`).join('')}</div>
     <div id="chatPend" class="chatpend hidden"></div>
