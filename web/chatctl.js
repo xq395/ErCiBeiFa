@@ -32,41 +32,33 @@ AI.raw = function (messages, tools, maxTokens, model, onDelta) {
   if (tools && c.perm === 'read') tools = tools.filter(t => !TOOLS[t.function.name] || !TOOLS[t.function.name].write);
   return _rawWith(messages, tools, maxTokens, model || (tools ? c.model : '') || undefined, tools ? c : null, onDelta);
 };
-async function _rawWith(messages, tools, maxTokens = 4000, model, c, onDelta) {
+async function _rawWith(messages, tools, maxTokens = 16000, model, c, onDelta) {
   if (!c) return _raw(messages, tools, maxTokens, model, onDelta);
   // 带工具 = 管家对话：用对话设置里的温度和思考强度
   const cur = AI.cur();
   if (!cur.apiKey) throw new Error('还没填 API Key（设置页）');
   if (!navigator.onLine) throw new Error('没联网');
   const ctl = new AbortController();
-  let timer = setTimeout(() => ctl.abort(), 120000);
-  const kick = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), 120000); };
+  let timer = setTimeout(() => ctl.abort(), 180000);
+  const kick = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), 180000); };
   try {
     if (window.AIDBG) AIDBG.round({ provider: cur.id, model: model || cur.model, temperature: c.temp, effort: c.effort,
       stream: !!onDelta, messages: messages.length, tools: (tools || []).map(t => t.function.name) });
-    const r = await fetch(cur.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
-      method: 'POST', signal: ctl.signal,
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cur.apiKey },
-      body: JSON.stringify({ model: model || cur.model, max_tokens: maxTokens, temperature: c.temp,
-        ...(cur.id === 'deepseek' ? { reasoning_effort: c.effort } : {}),
-        messages, ...(tools && tools.length ? { tools } : {}), ...(onDelta ? { stream: true } : {}) }),
-    });
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      if (r.status === 401) throw new Error(cur.name + ' 的 Key 无效');
-      if (r.status === 402) throw new Error(cur.name + ' 余额不足');
-      throw new Error((j.error && j.error.message) || cur.name + ' 返回 ' + r.status);
-    }
+    const r = await AI._chat({ model: model || cur.model, max_tokens: maxTokens, temperature: c.temp,
+      ...(cur.id === 'deepseek' ? { reasoning_effort: c.effort } : {}),
+      messages, ...(tools && tools.length ? { tools } : {}), ...(onDelta ? { stream: true } : {}) }, ctl.signal);
     if (onDelta) return await AI._readStream(r, onDelta, kick);
     const j = await r.json().catch(() => ({}));
     const ch = j.choices && j.choices[0];
     if (!ch || !ch.message) throw new Error('DeepSeek 返回格式不对');
     if (window.AIDBG) { AIDBG.delta(ch.message.reasoning_content || '', ch.message.content || ''); AIDBG.usage(j.usage); }
     Chat.lastUsage = j.usage;
+    ch.message.finish_reason = ch.finish_reason || '';
+    if (ch.finish_reason === 'length' && !ch.message.content && !ch.message.tool_calls) throw new Error('思考占满了输出上限，正文是空的，再试一次');
     return ch.message;
   } catch (e) {
     if (window.AIDBG) AIDBG.error(e.message || String(e));
-    if (e.name === 'AbortError') throw new Error('DeepSeek 120 秒没响应');
+    if (e.name === 'AbortError') throw new Error('DeepSeek 3 分钟没有新内容');
     throw e;
   } finally { clearTimeout(timer); }
 }

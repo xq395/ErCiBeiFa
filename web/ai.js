@@ -33,43 +33,62 @@ const AI = {
     if (ds) localStorage.setItem('beifa.dskey', ds.apiKey);
     if (!localStorage.getItem('beifa.provider') && list.length) localStorage.setItem('beifa.provider', list[0].id);
   },
-  async chat(system, user, maxTokens = 4000) {
+  async chat(system, user, maxTokens = 16000) {
     const m = await this.raw([{ role: 'system', content: system }, { role: 'user', content: user }], null, maxTokens);
     const text = (m.content || '').trim();
     if (!text) throw new Error('DeepSeek 返回了空内容，再试一次');
     return text;
   },
-  async raw(messages, tools, maxTokens = 4000, model, onDelta) {
+  async raw(messages, tools, maxTokens = 16000, model, onDelta) {
     const cur = this.cur();
     if (!cur.apiKey) throw new Error('还没填 API Key（设置页）');
     if (!navigator.onLine) throw new Error('没联网');
     const ctl = new AbortController();
-    let timer = setTimeout(() => ctl.abort(), 120000);
-    const kick = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), 120000); };
+    // 空闲 3 分钟才算卡住。长回答边出字边重置，不会因为写得久被掐断。
+    let timer = setTimeout(() => ctl.abort(), 180000);
+    const kick = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), 180000); };
     try {
-      const r = await fetch(cur.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
-        method: 'POST', signal: ctl.signal,
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cur.apiKey },
-        body: JSON.stringify({ model: model || cur.model, max_tokens: maxTokens, temperature: 0.5,
-          ...(cur.id === 'deepseek' ? { reasoning_effort: 'low' } : {}),
-          messages, ...(tools ? { tools } : {}), ...(onDelta ? { stream: true } : {}) }),
-      });
-      if (!r.ok) {
-        const j = await r.json().catch(() => ({}));
-        if (r.status === 401) throw new Error(cur.name + ' 的 Key 无效');
-        if (r.status === 402) throw new Error(cur.name + ' 余额不足');
-        throw new Error((j.error && j.error.message) || cur.name + ' 返回 ' + r.status);
-      }
+      const r = await this._chat({ model: model || cur.model, max_tokens: maxTokens, temperature: 0.5,
+        ...(cur.id === 'deepseek' ? { reasoning_effort: 'low' } : {}),
+        messages, ...(tools ? { tools } : {}), ...(onDelta ? { stream: true } : {}) }, ctl.signal);
       if (onDelta) return await this._readStream(r, onDelta, kick);
       const j = await r.json().catch(() => ({}));
       const c = j.choices && j.choices[0];
       if (!c || !c.message) throw new Error('DeepSeek 返回格式不对');
-      if (c.finish_reason === 'length' && !c.message.content && !c.message.tool_calls) throw new Error('回答被截断了，再试一次');
+      c.message.finish_reason = c.finish_reason || '';
+      if (c.finish_reason === 'length' && !c.message.content && !c.message.tool_calls) throw new Error('思考占满了输出上限，正文是空的，再试一次');
       return c.message;
     } catch (e) {
-      if (e.name === 'AbortError') throw new Error('DeepSeek 120 秒没响应');
+      if (e.name === 'AbortError') throw new Error('DeepSeek 3 分钟没有新内容');
       throw e;
     } finally { clearTimeout(timer); }
+  },
+  /* 发一次聊天请求并处理错误。部分中转站对 max_tokens 的上限更小（常见 8192），
+     被 400 拒绝时自动降到 8192 重试一次，换个服务商不用手动改。 */
+  async _chat(body, signal) {
+    const cur = this.cur();
+    const url = cur.baseUrl.replace(/\/+$/, '') + '/chat/completions';
+    const send = b => fetch(url, { method: 'POST', signal,
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cur.apiKey },
+      body: JSON.stringify(b) });
+    let r = await send(body);
+    if (r.ok) return r;
+    const readErr = async () => {
+      const txt = await r.text().catch(() => '');
+      try { const j = JSON.parse(txt); return (j.error && j.error.message) || txt.slice(0, 300); }
+      catch (e) { return txt.slice(0, 300); }
+    };
+    let msg = await readErr();
+    const mt = Number(body.max_tokens) || 0;
+    if (r.status === 400 && mt > 8192 && /max[_ ]?tokens|maximum|too (large|long|high)|limit|上限|超出/i.test(msg)) {
+      body.max_tokens = 8192;
+      r = await send(body);
+      if (r.ok) return r;
+      msg = await readErr();
+    }
+    if (r.status === 401) throw new Error(cur.name + ' 的 Key 无效');
+    if (r.status === 402) throw new Error(cur.name + ' 余额不足');
+    throw new Error(msg || cur.name + ' 返回 ' + r.status);
   },
   /* 读 SSE 流：内容边到边交给 onDelta；工具调用按 index 拼起来 */
   async _readStream(r, onDelta, kick) {
@@ -79,16 +98,18 @@ const AI = {
       if (!c || !c.message) throw new Error('DeepSeek 返回格式不对');
       if (window.AIDBG) AIDBG.delta(c.message.reasoning_content || '', c.message.content || '');
       if (c.message.content || c.message.reasoning_content) onDelta(c.message.content || '', c.message.content || '', c.message.reasoning_content || '');
+      c.message.finish_reason = c.finish_reason || '';
       return c.message;
     }
     const reader = r.body.getReader(), dec = new TextDecoder();
     const calls = [];
-    let buf = '', content = '', reasoning = '', end = false;
+    let buf = '', content = '', reasoning = '', finish = '', end = false;
     const handle = obj => {
       if (obj.error) throw new Error(obj.error.message || 'DeepSeek 流式错误');
       if (obj.usage) { this.lastUsage = obj.usage; if (typeof Chat !== 'undefined') Chat.lastUsage = obj.usage; if (window.AIDBG) AIDBG.usage(obj.usage); }
       const ch = obj.choices && obj.choices[0];
       if (!ch) return;
+      if (ch.finish_reason) finish = ch.finish_reason;
       const d = ch.delta || {};
       const dr = d.reasoning_content || '', dc = d.content || '';
       if (dr) reasoning += dr;
@@ -137,8 +158,10 @@ const AI = {
       type: 'function',
       function: { name: t.function.name, arguments: t.function.arguments || '{}' },
     }));
-    if (!content.trim() && !tool_calls.length) throw new Error('回答被截断了，再试一次');
-    const out = { role: 'assistant', content };
+    if (!content.trim() && !tool_calls.length) {
+      throw new Error(finish === 'length' ? '思考占满了输出上限，正文是空的，再试一次' : '回答被截断了，再试一次');
+    }
+    const out = { role: 'assistant', content, finish_reason: finish };
     if (tool_calls.length) out.tool_calls = tool_calls;
     return out;
   },

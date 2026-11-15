@@ -203,7 +203,7 @@ const Chat = {
       }
     }
     this.store(msgs); onStep();
-    let wrote = false, sendErr = null;
+    let wrote = false, sendErr = null, cont = '';
     this.extra = new Set();
     try {
       for (let round = 0; round < 8; round++) {
@@ -222,16 +222,32 @@ const Chat = {
           if (m.tool_call_id) o.tool_call_id = m.tool_call_id;
           return o;
         });
+        // 上一轮被输出上限截断：续写请求不写入对话，避免手机上多出一条「继续」
+        if (cont) {
+          api.push({ role: 'assistant', content: cont });
+          api.push({ role: 'user', content: '继续，从截断处接着写完。不要重复已经写过的内容，也不要加开场白。' });
+        }
         Chat.live = ''; Chat.reasoning = '';
-        const msg = await AI.raw([{ role: 'system', content: AGENT_SYS() }, ...api], Chat.tools ? Chat.tools(ctx) : toolSpecs(), 4000, undefined,
+        // 输出上限按「思考 + 正文」一起算。思考强度 low 也要两三千 token，4000 会把正文截掉。
+        // DeepSeek 上下文 1M、单次输出最多约 384K；这里给 32K，够长回答，也不至于一次请求挂太久。
+        const held = cont;
+        const msg = await AI.raw([{ role: 'system', content: AGENT_SYS() }, ...api], Chat.tools ? Chat.tools(ctx) : toolSpecs(), 32000, undefined,
           (full, delta, reasoning) => {
-            Chat.live = full;
+            Chat.live = held + full;
             Chat.reasoning = reasoning || '';
             if (!Chat.liveT) Chat.liveT = setTimeout(() => { Chat.liveT = null; paintLive(); }, 80);
           });
         if (Chat.liveT) { clearTimeout(Chat.liveT); Chat.liveT = null; }
         Chat.live = ''; Chat.reasoning = '';
-        const out = { role: 'assistant', content: msg.content || '', t: Date.now() };
+        // 到上限就被截断：拼上已有正文再要一段。有工具调用时不续，先把工具跑完。
+        if (msg.finish_reason === 'length' && !(msg.tool_calls && msg.tool_calls.length) && round < 7) {
+          cont = (cont + (msg.content || '')).replace(/\s+$/, '');
+          Chat.live = cont;
+          paintLive();
+          continue;
+        }
+        const out = { role: 'assistant', content: (cont + (msg.content || '')).replace(/^\s+/, ''), t: Date.now() };
+        cont = '';
         if (msg.tool_calls && msg.tool_calls.length) out.tool_calls = msg.tool_calls;
         msgs.push(out);
         if (!out.tool_calls) break;
