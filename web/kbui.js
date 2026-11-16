@@ -8,7 +8,7 @@ function renderKB() {
   const tabs = { search: '检索', review: `复习${due.length ? ' ' + due.length : ''}`, cards: `卡片 ${cards.length}`, docs: `文档 ${docs.length}` };
   let h = `<div class="card"><div class="seg">${Object.entries(tabs).map(([k, v]) =>
     `<button class="${kbTab === k ? 'on' : ''}" data-kbtab="${k}">${v}</button>`).join('')}</div>`;
-  h += `<div class="kbup"><button class="mini primary" id="kbImp">＋ 上传文件</button><button class="mini" id="kbPaste">粘贴文字</button>
+  h += `<div class="kbup"><button class="mini primary" id="kbImp">＋ 上传文件</button><button class="mini" id="kbPaste">粘贴文字</button><button class="mini ghost" id="kbPick">让管家挑</button>
     <input id="kbFile" type="file" multiple accept="${FILE_ACCEPT}" class="hidden"></div>
     <label class="chkline"><input type="checkbox" id="kbForceOcr" ${localStorage.getItem('beifa.forceOcr') === '1' ? 'checked' : ''}> 强制识图（公式 / 扫描 PDF，慢一些、费 token）</label>`;
   if (kbBusy) h += `<div class="dim">${esc(kbBusy)}</div>`;
@@ -72,7 +72,7 @@ function renderKB() {
       : `${esc(d.src || '')} · ${(d.size / 1000).toFixed(1)} 千字 · ${d.chunks} 段 · ${ymd(new Date(d.ts)).slice(5)}`;
     return `<div class="card kbdoc"><div class="row1"><div><b>${audio ? '🎧' : '📄'} ${esc(d.title)}</b>
     <div class="dim">${info}</div></div>
-    <span><button class="mini ghost" data-kbview="${d.id}">${audio ? '播放' : '看'}</button>${audio ? '' : `<button class="mini ghost" data-kbcards="${d.id}">出题</button>`}
+    <span><button class="mini ghost" data-kbview="${d.id}">${audio ? '播放' : '看'}</button>${audio ? '' : `<button class="mini ghost" data-kbsend="${d.id}">发给管家</button>`}
     <button class="mini ghost" data-kbdel="${d.id}">删</button></span></div></div>`;
   }).join('');
   $('#tab-kb').innerHTML = h;
@@ -96,6 +96,30 @@ function cardForm(c) {
     <div class="btns"><button class="primary" id="cfSave" data-id="${c.id || ''}">保存</button>${c.id ? `<button class="ghost" id="cfDel" data-id="${c.id}">删除</button>` : ''}</div></div>`;
   box.dataset.lv = c.level ?? 0;
 }
+// 文档正文：保留原来的逐行显示和搜索高亮，同时把 $...$、$$...$$ 交给 KaTeX。
+// 这里不做完整 Markdown，避免 PDF 抽出来的普通文本被误当成标题/列表/表格。
+function docHTML(s, q) {
+  s = String(s ?? '');
+  const blocks = [];
+  s = s.replace(/\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]/g, (m, a, b) => {
+    blocks.push({ tex: a != null ? a : b, display: true });
+    return `\n@@~KTX${blocks.length - 1}~@@\n`;
+  });
+  s = s.replace(/\$([^$\n]+?)\$|\\\((.+?)\\\)/g, (m, a, b) => {
+    blocks.push({ tex: a != null ? a : b, display: false });
+    return `@@~KTX${blocks.length - 1}~@@`;
+  });
+  let h = hl(esc(s), q).replace(/\n/g, '<br>');
+  if (blocks.length) {
+    h = h.replace(/@@~KTX(\d+)~@@/g, (m, i) => {
+      const b = blocks[+i];
+      return `<span class="texph" data-tex="${esc(b.tex)}" data-display="${b.display ? 1 : 0}">${esc(b.tex)}</span>`;
+    });
+    if (typeof scheduleMath === 'function') scheduleMath();
+  }
+  return h;
+}
+
 async function viewDoc(id, focus) {
   const d = KB.get(id);
   if (d && d.kind === 'audio') return viewAudio(d);
@@ -108,9 +132,111 @@ async function viewDoc(id, focus) {
   const box = $('#modal'); box.classList.remove('hidden');
   box.innerHTML = `<div class="mbox"><div class="mhead"><div><b>${esc(d ? d.title : '文档')}</b><div class="dim">${ch ? ch.length + ' 段' + from : ''}</div></div>
     <button class="ghost" data-close>×</button></div><div class="mbody" id="docBody">${ch ? ch.map(c =>
-    `<div class="docch ${c.i === focus ? 'focus' : ''}" id="dc${c.i}">${c.head ? `<b>${esc(c.head)}</b><br>` : ''}${hl(esc(c.text), kbQ).replace(/\n/g, '<br>')}</div>`).join('')
-    : '<div class="dim">这台设备上没有正文。连上电脑后会自动从电脑取；电脑上也没有的话，需要在导入它的设备上打开。</div>'}</div></div>`;
+    `<div class="docch ${c.i === focus ? 'focus' : ''}" id="dc${c.i}">${c.head ? `<b>${docHTML(c.head, kbQ)}</b><br>` : ''}${docHTML(c.text, kbQ)}</div>`).join('')
+    : '<div class="dim">这台设备上没有正文。连上电脑后会自动从电脑取；电脑上也没有的话，需要在导入它的设备上打开。</div>'}</div>
+    ${d ? `<div class="btns" style="margin-top:-2px"><button class="primary" data-kbsend="${d.id}">发给管家</button>
+      <button class="ghost" data-kbopenfile="${d.id}" title="原文件不在本机时导出文字">用其他软件打开</button></div>` : ''}
+    </div>`;
   if (focus != null) setTimeout(() => { const el = $('#dc' + focus); if (el) el.scrollIntoView({ block: 'center' }); }, 50);
+}
+
+// 把知识库文档作为附件放进管家输入框；之后用户补一句问题就能发送
+function sendDocToChat(d) {
+  if (!d) return;
+  $('#modal').classList.add('hidden');
+  openTab('chat');
+  if (!pendingFiles.some(x => x.id === d.id)) {
+    pendingFiles.push({ id: d.id, title: d.title, chunks: d.chunks || 0, size: d.size || 0, kind: d.kind || 'doc' });
+  }
+  renderPend();
+  const inp = $('#chatIn');
+  if (inp && !inp.value.trim()) {
+    inp.value = `看看知识库里的《${d.title}》，`;
+    autoGrow(inp);
+  }
+  setTimeout(() => { const i = $('#chatIn'); if (i) i.focus(); }, 80);
+  toast('已附到输入框上方，补充问题后发送');
+}
+
+const MIME_BY_EXT = {
+  pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  bmp: 'image/bmp', heic: 'image/heic', tif: 'image/tiff', tiff: 'image/tiff',
+  md: 'text/plain', markdown: 'text/plain', txt: 'text/plain', csv: 'text/csv', tsv: 'text/tab-separated-values',
+  json: 'application/json', xml: 'application/xml', yaml: 'application/x-yaml', yml: 'application/x-yaml',
+  html: 'text/html', htm: 'text/html', tex: 'text/x-tex', c: 'text/x-c', h: 'text/x-c', cpp: 'text/x-c++src',
+  py: 'text/x-python', java: 'text/x-java', js: 'text/javascript', ts: 'text/plain', go: 'text/plain',
+  rs: 'text/plain', sql: 'text/plain', log: 'text/plain', ipynb: 'application/json',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg',
+  opus: 'audio/ogg', flac: 'audio/flac', webm: 'audio/webm', mp4: 'audio/mp4',
+};
+function mimeByName(name, fallback) {
+  const m = /\.([a-z0-9]+)$/i.exec(name || '');
+  return MIME_BY_EXT[(m && m[1] || '').toLowerCase()] || fallback || 'application/octet-stream';
+}
+
+async function docSource(d) {
+  if (!d) throw new Error('没有这个文档');
+  if (d.kind === 'audio') {
+    const b = await AudioStore.get(d.id);
+    if (!b) throw new Error('音频只存在导入它的设备上');
+    const name = d.src || (d.title + '.mp3');
+    return { blob: b, name, mime: d.mime || mimeByName(name, 'audio/mpeg'), fallback: false };
+  }
+  const rec = await SrcStore.get(d.id);
+  if (rec && rec.blob && rec.blob.size) {
+    return { blob: rec.blob, name: rec.name || d.src || (d.title + '.bin'),
+      mime: rec.mime || mimeByName(rec.name || d.src, ''), fallback: false };
+  }
+  let ch = await DocStore.get(d.id);
+  if (!ch && window.DocSync && Sync.server() && Sync.pin()) ch = await window.DocSync.fetch(d.id);
+  if (!ch || !ch.length) throw new Error('这台设备上没有原文件，也没有正文');
+  const text = ch.map(c => (c.head ? `## ${c.head}\n\n` : '') + c.text).join('\n\n');
+  return { blob: new Blob([text], { type: 'text/plain;charset=utf-8' }), name: d.title + '.md', mime: 'text/plain', fallback: true };
+}
+
+function blobB64(blob) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => { const s = String(r.result || ''); res(s.slice(s.indexOf(',') + 1)); };
+    r.onerror = () => rej(new Error('读不到文件'));
+    r.readAsDataURL(blob);
+  });
+}
+
+async function openDocExternal(d) {
+  try {
+    const src = await docSource(d);
+    if (!src.blob || !src.blob.size) throw new Error('没有内容');
+    if (window.Native) {
+      if (!Native.openBegin) throw new Error('这个 App 版本还不支持，装新版 APK');
+      const st = String(Native.openBegin(src.name, src.mime));
+      if (st.startsWith('ERR')) throw new Error(st.slice(4).trim() || '打不开');
+      try {
+        const step = 1024 * 1024;
+        for (let off = 0; off < src.blob.size; off += step) {
+          const b64 = await blobB64(src.blob.slice(off, off + step));
+          const r = String(Native.openChunk(b64));
+          if (r.startsWith('ERR')) throw new Error(r.slice(4).trim() || '写入失败');
+        }
+        const fin = String(Native.openEnd());
+        if (fin.startsWith('ERR')) throw new Error(fin.slice(4).trim() || '打不开');
+        toast(src.fallback ? '原文件不在本机，已导出文字' : '已交给其他软件打开');
+      } catch (e) {
+        try { Native.openAbort(); } catch (e2) { /* ignore */ }
+        throw e;
+      }
+    } else {
+      const url = URL.createObjectURL(src.blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = src.name || 'file';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      toast('已导出，浏览器会下载它');
+    }
+  } catch (e) { toast(e.message || '打不开'); }
 }
 
 /* 英语听力：音频只在导入它的设备上，播放器做成本地的 */
@@ -137,7 +263,8 @@ async function viewAudio(d) {
     <audio id="aud" controls preload="metadata" src="${lastAudioURL}"></audio>
     <div class="btns audbtns">${[0.75, 1, 1.25, 1.5].map(x => `<button data-audspeed="${x}" class="${x === 1 ? 'on' : ''}">${x}×</button>`).join('')}
       <label class="chkline"><input type="checkbox" id="audLoop"> 循环</label></div>
-    <div class="dim" style="margin-top:8px">${esc(d.src || '')} · ${fmtSize(d.size)}${d.dur ? ' · ' + fmtTime(d.dur) : ''}</div></div></div>`;
+    <div class="dim" style="margin-top:8px">${esc(d.src || '')} · ${fmtSize(d.size)}${d.dur ? ' · ' + fmtTime(d.dur) : ''}</div></div>
+    <div class="btns" style="margin-top:-2px"><button class="ghost" data-kbopenfile="${d.id}">用其他软件打开</button></div></div>`;
   const a = $('#aud');
   box.querySelectorAll('[data-audspeed]').forEach(b => b.onclick = () => {
     a.playbackRate = +b.dataset.audspeed;
@@ -186,18 +313,20 @@ document.addEventListener('click', async e => {
     $('#modal').classList.add('hidden'); toast(`已存入：${doc.chunks} 段`); renderKB();
   }
   if (d.kbview) viewDoc(d.kbview);
+  if (d.kbsend) { const doc = KB.get(d.kbsend); if (doc) sendDocToChat(doc); return; }
+  if (d.kbopenfile) { const doc = KB.get(d.kbopenfile); if (doc) openDocExternal(doc); return; }
+  if (t.id === 'kbPick') {
+    if (Chat.busy) { toast('管家还在回复，稍等'); return; }
+    openTab('chat');
+    setTimeout(async () => {
+      try { await Chat.send('我知识库里有哪些文档？结合我最近最薄弱的科目，挑一份最适合现在看的，说明理由，然后先带我过一遍重点。', renderChat); }
+      catch (err) { toast(err.message); }
+    }, 50);
+    return;
+  }
   if (d.kbdel) {
     const x = KB.get(d.kbdel);
     if (x && confirm(`删除文档「${x.title}」？`)) { KB.remove(d.kbdel); Index.invalidate(); renderKB(); }
-  }
-  if (d.kbcards) {
-    const doc = KB.get(d.kbcards);
-    const n = prompt(`从「${doc.title}」出几道题做成卡片？`, '8');
-    if (!n) return;
-    openTab('chat');
-    setTimeout(async () => {
-      try { await Chat.send(`从知识库文档「${doc.title}」（id ${doc.id}）里挑最重要、最容易错的知识点，出 ${n} 张复习卡片（题目+答案），用 add_cards 存进知识库。`, renderChat); } catch (err) { toast(err.message); }
-    }, 50);
   }
   if (t.id === 'kbNewCard') cardForm(null);
   if (d.cflv != null && t.classList.contains('lvb') && $('#cfT')) {
@@ -337,7 +466,7 @@ Object.assign(TOOL_LABEL, { search_kb: '检索知识库', read_doc: '读文档',
 const _sysKB = AGENT_SYS;
 AGENT_SYS = function () {
   const n = Mem.all().length, due = KB.dueCards().length, nd = KB.all('doc').length, nc = KB.all('card').length;
-  return _sysKB() + `\n- 知识库：${nd} 篇文档、${nc} 张卡片，今天待复习 ${due} 张。回答知识点、讲题时可以先 search_kb（只返回片段），引用时注明出处（文档名）。读整篇文件用 read_doc：只有学生明确提到某个文件（发了附件并问它、点名某份资料）才读，不要主动翻文件。消息里的 [附件 文档id=…] 就是学生这次发的文件，已存进知识库。学生发错题或说"记一下这题"，用 add_cards 存卡片；说会了/不熟时用 update_card 传 level。讲题时若知识库里有相关卡片，顺带提一句它的熟悉度。` +
+  return _sysKB() + `\n- 知识库：${nd} 篇文档、${nc} 张卡片，今天待复习 ${due} 张。回答知识点、讲题时可以先 search_kb（只返回片段），引用时注明出处（文档名）。读整篇文件用 read_doc：只有学生明确提到某个文件（发了附件并问它、点名某份资料）才读，不要主动翻文件。消息里的 [附件 文档id=…] 就是学生这次发的文件，已存进知识库。学生问"知识库里有什么 / 挑一份资料 / 用知识库里的文档"时，先用 list_kb 看目录，再挑合适的用 read_doc 读，不要猜文件名。学生发错题或说"记一下这题"，用 add_cards 存卡片；说会了/不熟时用 update_card 传 level。讲题时若知识库里有相关卡片，顺带提一句它的熟悉度。` +
     `\n- 长期记忆只放学生本人的短信息（情况、偏好、约定、薄弱点一句话）；知识内容、题目、方法细节放知识库（save_to_kb / add_cards），不要塞进 remember。` +
     (n > 25 ? `\n- 当前长期记忆有 ${n} 条，偏多。合适时建议学生把知识性的条目移进知识库。` : '');
 };

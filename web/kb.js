@@ -30,6 +30,7 @@ const KB = {
     if (x.type === 'doc') {
       DocStore.del(id);
       if (x.kind === 'audio') AudioStore.del(id);
+      else SrcStore.del(id);
     }
     return true;
   },
@@ -129,6 +130,51 @@ const AudioStore = {
   async del(id) {
     delete this.mem[id];
     try { const db = await this.open(); db.transaction('audio', 'readwrite').objectStore('audio').delete(id); } catch (e) { /* ignore */ }
+  },
+};
+
+/* 原文件：只存在导入它的设备上，用于"用其他软件打开"；不进备份、不随同步走。
+   文档/图片/Office 的原文件存这里；音频有 AudioStore。超过 60MB 就不存，只能导出文字。 */
+const SrcStore = {
+  db: null, mem: {}, broken: false,
+  open() {
+    if (this.broken) return Promise.reject(new Error('no idb'));
+    if (this.db) return Promise.resolve(this.db);
+    return withTimeout(new Promise((res, rej) => {
+      const r = indexedDB.open('beifa-src', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('src');
+      r.onsuccess = () => { this.db = r.result; res(this.db); };
+      r.onerror = () => rej(r.error);
+    }), 2000).catch(e => { this.broken = true; throw e; });
+  },
+  async put(id, file) {
+    if (!file || !file.size || file.size > 60 * 1024 * 1024) return false;
+    const rec = { blob: file, name: file.name || 'file', mime: file.type || '' };
+    this.mem[id] = rec;
+    try {
+      const db = await this.open();
+      await withTimeout(new Promise((res, rej) => {
+        const tx = db.transaction('src', 'readwrite'); tx.objectStore('src').put(rec, id);
+        tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+      }), 8000);
+      return true;
+    } catch (e) { return false; }
+  },
+  async get(id) {
+    if (this.mem[id]) return this.mem[id];
+    try {
+      const db = await this.open();
+      const v = await withTimeout(new Promise(res => {
+        const q = db.transaction('src').objectStore('src').get(id);
+        q.onsuccess = () => res(q.result || null); q.onerror = () => res(null);
+      }), 3000);
+      if (v) this.mem[id] = v;
+      return v;
+    } catch (e) { return null; }
+  },
+  async del(id) {
+    delete this.mem[id];
+    try { const db = await this.open(); db.transaction('src', 'readwrite').objectStore('src').delete(id); } catch (e) { /* ignore */ }
   },
 };
 
@@ -524,6 +570,8 @@ async function importFile(file, onProg, opts = {}) {
   const chunks = chunkText(text, title);
   const d = KB.put({ type: 'doc', title, src: file.name, size: text.length, chunks: chunks.length });
   const stored = await DocStore.put(d.id, chunks);
+  onProg && onProg('保存原文件…');
+  await SrcStore.put(d.id, file);
   Index.invalidate();
   return { doc: d, stored, chunks: chunks.length };
 }

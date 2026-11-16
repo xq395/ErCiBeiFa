@@ -48,12 +48,18 @@ public class MainActivity extends Activity {
     static final String CHANNEL = "beifa";
     private static final int PICK_FILE = 1;
     private static final long MAX_SHARE = 40L * 1024 * 1024;
+    private static final long MAX_OPEN = 80L * 1024 * 1024;
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
     private final Object shareLock = new Object();
     private final List<JSONObject> pendingShares = new ArrayList<>();
     private volatile boolean jsReady = false;
     private int shareSeq = 0;
+    private final Object openLock = new Object();
+    private FileOutputStream openOut = null;
+    private File openTmp = null;
+    private String openName = null, openMime = null;
+    private long openSize = 0;
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -340,6 +346,13 @@ public class MainActivity extends Activity {
         } catch (Exception e) { return null; }
     }
 
+    /* ---------- 用其他软件打开：网页分块送 base64，这里写缓存，再放进下载目录并用 ACTION_VIEW 交给外部应用 ---------- */
+    private void abortOpenLocked() {
+        try { if (openOut != null) openOut.close(); } catch (Exception ignored) { }
+        if (openTmp != null) openTmp.delete();
+        openOut = null; openTmp = null; openName = null; openMime = null; openSize = 0;
+    }
+
     private Uri[] localize(Uri[] picked) {
         if (picked == null) return null;
         Uri[] out = new Uri[picked.length];
@@ -410,6 +423,7 @@ public class MainActivity extends Activity {
         long cutoff = System.currentTimeMillis() - 24L * 3600 * 1000;
         cleanDir(new File(getCacheDir(), "picked"), cutoff);
         cleanDir(new File(getCacheDir(), "shared"), cutoff);
+        cleanDir(new File(getCacheDir(), "open"), cutoff);
     }
 
     private void cleanDir(File dir, long cutoff) {
@@ -502,6 +516,95 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void clearShared(String path) {
             try { File f = sharedFile(path); if (f != null) f.delete(); } catch (Exception ignored) { }
+        }
+
+        /** 用其他软件打开：先建临时文件，网页分块送 base64，最后放进下载目录并交给 ACTION_VIEW */
+        @JavascriptInterface
+        public String openBegin(String name, String mime) {
+            synchronized (openLock) {
+                abortOpenLocked();
+                try {
+                    String safe = safeFileName(name == null ? "文件" : name, pickExt(name, mime));
+                    File dir = new File(getCacheDir(), "open");
+                    if (!dir.exists() && !dir.mkdirs()) throw new Exception("缓存目录不可用");
+                    openTmp = new File(dir, System.currentTimeMillis() + "_" + safe);
+                    openOut = new FileOutputStream(openTmp);
+                    openName = safe;
+                    openMime = (mime == null || mime.isEmpty()) ? "application/octet-stream" : mime;
+                    openSize = 0;
+                    return "ok";
+                } catch (Exception e) {
+                    abortOpenLocked();
+                    return "ERR " + (e.getMessage() == null ? "打不开" : e.getMessage());
+                }
+            }
+        }
+
+        @JavascriptInterface
+        public String openChunk(String b64) {
+            synchronized (openLock) {
+                if (openOut == null) return "ERR 没有开始";
+                try {
+                    byte[] b = android.util.Base64.decode(b64, android.util.Base64.DEFAULT);
+                    openSize += b.length;
+                    if (openSize > MAX_OPEN) { abortOpenLocked(); return "ERR 文件超过 80MB"; }
+                    openOut.write(b);
+                    return "ok";
+                } catch (Exception e) {
+                    abortOpenLocked();
+                    return "ERR " + (e.getMessage() == null ? "写入失败" : e.getMessage());
+                }
+            }
+        }
+
+        @JavascriptInterface
+        public String openEnd() {
+            File tmp;
+            String name, mime;
+            synchronized (openLock) {
+                if (openOut == null || openTmp == null) return "ERR 没有开始";
+                try { openOut.close(); } catch (Exception ignored) { }
+                openOut = null;
+                tmp = openTmp; name = openName; mime = openMime;
+                openTmp = null; openName = null; openMime = null;
+                openSize = 0;
+            }
+            if (Build.VERSION.SDK_INT < 29) {
+                tmp.delete();
+                return "ERR 这个系统版本不支持直接打开，请先保存到下载目录";
+            }
+            try {
+                ContentValues v = new ContentValues();
+                v.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                v.put(MediaStore.Downloads.MIME_TYPE, mime);
+                v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/北伐打卡/打开");
+                Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                if (u == null) throw new Exception("无法创建文件");
+                try (InputStream in = new FileInputStream(tmp);
+                     OutputStream out = getContentResolver().openOutputStream(u)) {
+                    if (out == null) throw new Exception("无法写入");
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                }
+                tmp.delete();
+                Intent view = new Intent(Intent.ACTION_VIEW);
+                view.setDataAndType(u, mime);
+                view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                runOnUiThread(() -> {
+                    try { startActivity(Intent.createChooser(view, "用其他软件打开")); }
+                    catch (Exception e) { Toast.makeText(MainActivity.this, "没有能打开这个文件的软件", Toast.LENGTH_SHORT).show(); }
+                });
+                return "ok";
+            } catch (Exception e) {
+                tmp.delete();
+                return "ERR " + (e.getMessage() == null ? "打不开" : e.getMessage());
+            }
+        }
+
+        @JavascriptInterface
+        public void openAbort() {
+            synchronized (openLock) { abortOpenLocked(); }
         }
 
         /** 本机的局域网 IPv4 地址（逗号分隔），用来在同一网段里找电脑 */
