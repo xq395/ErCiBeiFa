@@ -410,14 +410,14 @@ function renderPend() {
 // 手机相册返回的文件有时 type 是空的（只有文件名），所以再按扩展名认一遍
 const IMG_FILE = /\.(jpe?g|png|webp|gif|bmp|heic|heif|avif|tiff?)$/i;
 const isImageFile = f => /^image\//.test(f.type || '') || IMG_FILE.test(f.name || '');
-document.addEventListener('change', async e => {
-  if (e.target.id !== 'chatImg' || !e.target.files.length) return;
-  const list = [...e.target.files];
+// 把 File 列表放进输入框下方的待发附件：图片走识图，文档/音频先导入知识库再引用。
+// 文件选择器和"分享到 App"共用这一份逻辑。
+async function attachFiles(files) {
   let addedImgs = 0, addedFiles = 0, failed = 0;
-  for (const f of list) {
+  for (const f of files) {
     try {
       if (isImageFile(f)) {
-        if (pendingImgs.length >= MAX_IMGS) { toast(`一次最多 ${MAX_IMGS} 张图`); continue; }
+        if (pendingImgs.length >= MAX_IMGS) { toast(`一次最多 ${MAX_IMGS} 张图`); failed++; continue; }
         pendingImgs.push(await Img.fromFile(f));
         addedImgs++;
         renderPend();
@@ -429,7 +429,6 @@ document.addEventListener('change', async e => {
       addedFiles++;
     } catch (err) { failed++; toast((err && err.message) || '这个文件没读出来'); }
   }
-  e.target.value = ''; // 读完再清，免得某些 WebView 提前失效
   pendBusy = ''; renderPend();
   if (addedImgs || addedFiles) {
     const parts = [];
@@ -437,6 +436,13 @@ document.addEventListener('change', async e => {
     if (addedFiles) parts.push(`${pendingFiles.length} 个文件`);
     toast('已附上 ' + parts.join('、') + (failed ? `；${failed} 个没读出来` : ''));
   }
+  return { addedImgs, addedFiles, failed };
+}
+document.addEventListener('change', async e => {
+  if (e.target.id !== 'chatImg' || !e.target.files.length) return;
+  const list = [...e.target.files];
+  await attachFiles(list);
+  e.target.value = ''; // 读完再清，免得某些 WebView 提前失效
 });
 // 电脑上可以直接在输入框里粘贴截图
 document.addEventListener('paste', async e => {

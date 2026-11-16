@@ -32,17 +32,28 @@ import android.webkit.WebViewClient;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     static final String CHANNEL = "beifa";
     private static final int PICK_FILE = 1;
+    private static final long MAX_SHARE = 40L * 1024 * 1024;
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
+    private final Object shareLock = new Object();
+    private final List<JSONObject> pendingShares = new ArrayList<>();
+    private volatile boolean jsReady = false;
+    private int shareSeq = 0;
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -106,6 +117,8 @@ public class MainActivity extends Activity {
             public boolean onConsoleMessage(ConsoleMessage m) { return true; }
         });
         web.loadUrl("file:///android_asset/index.html" + tabFrom(getIntent()));
+        // 冷启动就是"分享/打开方式"进来的：先复制到缓存，等网页启动后自己来取
+        if (saved == null) acceptShareIntent(getIntent());
     }
 
     private String tabFrom(Intent i) {
@@ -116,10 +129,12 @@ public class MainActivity extends Activity {
     @Override
     protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
+        setIntent(i);
         String tab = i.getStringExtra("tab");
         if (tab != null && web != null) {
             web.evaluateJavascript("window.openTab && openTab(" + jsString(tab) + ")", null);
         }
+        acceptShareIntent(i);
     }
 
     @Override
@@ -156,6 +171,173 @@ public class MainActivity extends Activity {
             return;
         }
         super.onActivityResult(req, res, data);
+    }
+
+    /* ---------- 分享 / 用其他 App 打开：把文件复制到缓存，网页用 Native.takeShared() 来取 ---------- */
+    private void acceptShareIntent(Intent i) {
+        if (i == null) return;
+        String action = i.getAction();
+        if (!Intent.ACTION_SEND.equals(action) && !Intent.ACTION_SEND_MULTIPLE.equals(action)
+                && !Intent.ACTION_VIEW.equals(action)) return;
+        boolean got = false;
+        if (Intent.ACTION_SEND.equals(action)) {
+            Uri u = streamUri(i);
+            if (shareable(u)) {
+                queueShared(u, i.getType());
+                got = true;
+            } else {
+                CharSequence text = i.getCharSequenceExtra(Intent.EXTRA_TEXT);
+                if (text != null && text.length() > 0) {
+                    queueText(text, i.getCharSequenceExtra(Intent.EXTRA_SUBJECT));
+                    got = true;
+                }
+            }
+        } else if (Intent.ACTION_SEND_MULTIPLE.equals(action)) {
+            ArrayList<Uri> us = streamUris(i);
+            if (us != null) for (Uri u : us) {
+                if (shareable(u)) { queueShared(u, i.getType()); got = true; }
+            }
+        } else {
+            Uri u = i.getData();
+            if (shareable(u)) { queueShared(u, i.getType()); got = true; }
+        }
+        if (got) {
+            if (jsReady) notifyShared();
+            // 别让这个 Intent 在 Activity 重建时再投递一次
+            i.setAction(null);
+            i.setData(null);
+            i.removeExtra(Intent.EXTRA_STREAM);
+            i.removeExtra(Intent.EXTRA_TEXT);
+            i.removeExtra(Intent.EXTRA_SUBJECT);
+        }
+    }
+
+    private boolean shareable(Uri u) {
+        if (u == null) return false;
+        String s = u.getScheme();
+        return "content".equals(s) || "file".equals(s);
+    }
+
+    private void notifyShared() {
+        if (web == null) return;
+        web.post(() -> web.evaluateJavascript("window.onNativeShared && window.onNativeShared()", null));
+    }
+
+    @SuppressWarnings("deprecation")
+    private Uri streamUri(Intent i) {
+        try {
+            Object o = i.getParcelableExtra(Intent.EXTRA_STREAM);
+            return o instanceof Uri ? (Uri) o : null;
+        } catch (Exception e) { return null; }
+    }
+
+    @SuppressWarnings("deprecation")
+    private ArrayList<Uri> streamUris(Intent i) {
+        try {
+            ArrayList<Uri> us = i.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (us != null && !us.isEmpty()) return us;
+        } catch (Exception ignored) { }
+        Uri u = streamUri(i);
+        if (u == null) return null;
+        ArrayList<Uri> one = new ArrayList<>();
+        one.add(u);
+        return one;
+    }
+
+    private void queueShared(Uri u, String fallbackMime) {
+        String mime = null;
+        try { mime = getContentResolver().getType(u); } catch (Exception ignored) { }
+        if (mime == null || mime.isEmpty()) mime = fallbackMime;
+        String name = pickName(u);
+        if (name == null || name.trim().isEmpty()) name = "分享文件";
+        String ext = pickExt(name, mime);
+        String safe = safeFileName(name, ext);
+        File dir = shareDir();
+        if (dir == null) { queueError(safe, "缓存目录不可用"); return; }
+        File dest = new File(dir, safe);
+        long size = 0;
+        try (InputStream in = getContentResolver().openInputStream(u)) {
+            if (in == null) throw new Exception("打不开这个文件");
+            try (OutputStream os = new FileOutputStream(dest)) {
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    size += n;
+                    if (size > MAX_SHARE) throw new Exception("文件超过 40MB");
+                    os.write(buf, 0, n);
+                }
+            }
+            JSONObject o = new JSONObject();
+            o.put("name", safe);
+            o.put("mime", mime == null ? "" : mime);
+            o.put("size", size);
+            o.put("path", Uri.fromFile(dest).toString());
+            synchronized (shareLock) { pendingShares.add(o); }
+        } catch (Exception e) {
+            dest.delete();
+            queueError(safe, e.getMessage() == null ? "读取失败" : e.getMessage());
+        }
+    }
+
+    private void queueText(CharSequence text, CharSequence subject) {
+        String raw = text == null ? "" : text.toString().trim();
+        if (raw.isEmpty()) return;
+        byte[] bytes = raw.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > MAX_SHARE) { queueError("分享的文字", "文字太长"); return; }
+        String base = subject == null ? "" : subject.toString().trim();
+        if (base.isEmpty()) base = "分享的文字";
+        String safe = safeFileName(base, ".txt");
+        File dir = shareDir();
+        if (dir == null) { queueError(safe, "缓存目录不可用"); return; }
+        File dest = new File(dir, safe);
+        try (FileOutputStream out = new FileOutputStream(dest)) {
+            out.write(bytes);
+            JSONObject o = new JSONObject();
+            o.put("name", safe);
+            o.put("mime", "text/plain");
+            o.put("size", bytes.length);
+            o.put("text", true);
+            o.put("path", Uri.fromFile(dest).toString());
+            synchronized (shareLock) { pendingShares.add(o); }
+        } catch (Exception e) {
+            dest.delete();
+            queueError(safe, e.getMessage() == null ? "写入失败" : e.getMessage());
+        }
+    }
+
+    private void queueError(String name, String msg) {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("name", name == null ? "文件" : name);
+            o.put("error", msg == null ? "读取失败" : msg);
+        } catch (Exception ignored) { }
+        synchronized (shareLock) { pendingShares.add(o); }
+    }
+
+    private File shareDir() {
+        File dir = new File(new File(getCacheDir(), "shared"),
+                System.currentTimeMillis() + "_" + (shareSeq++));
+        return dir.exists() || dir.mkdirs() ? dir : null;
+    }
+
+    private String safeFileName(String name, String ext) {
+        String safe = name == null ? "" : name.replaceAll("[\\\\/:*?\"<>|\\s]+", "_").trim();
+        if (safe.isEmpty()) safe = "file";
+        if (safe.length() > 64) safe = safe.substring(0, 64);
+        if (!safe.toLowerCase(Locale.ROOT).endsWith(ext.toLowerCase(Locale.ROOT))) safe += ext;
+        return safe;
+    }
+
+    /** 只允许网页回读 App 自己缓存里的分享文件 */
+    private File sharedFile(String path) {
+        try {
+            Uri u = Uri.parse(path);
+            if (!"file".equals(u.getScheme())) return null;
+            File f = new File(u.getPath()).getCanonicalFile();
+            String root = new File(getCacheDir(), "shared").getCanonicalPath();
+            if (!f.getPath().startsWith(root + File.separator)) return null;
+            return f.isFile() ? f : null;
+        } catch (Exception e) { return null; }
     }
 
     private Uri[] localize(Uri[] picked) {
@@ -225,9 +407,14 @@ public class MainActivity extends Activity {
     }
 
     private void cleanPicked() {
-        File[] fs = new File(getCacheDir(), "picked").listFiles();
-        if (fs == null) return;
         long cutoff = System.currentTimeMillis() - 24L * 3600 * 1000;
+        cleanDir(new File(getCacheDir(), "picked"), cutoff);
+        cleanDir(new File(getCacheDir(), "shared"), cutoff);
+    }
+
+    private void cleanDir(File dir, long cutoff) {
+        File[] fs = dir.listFiles();
+        if (fs == null) return;
         for (File f : fs) if (f.lastModified() < cutoff) rm(f);
     }
 
@@ -276,6 +463,46 @@ public class MainActivity extends Activity {
     class Bridge {
         @JavascriptInterface
         public String version() { return "1"; }
+
+        /** 分享/打开方式收下的文件：取一次就清空，避免重复弹窗 */
+        @JavascriptInterface
+        public String takeShared() {
+            JSONArray arr = new JSONArray();
+            try {
+                synchronized (shareLock) {
+                    for (JSONObject o : pendingShares) arr.put(o);
+                    pendingShares.clear();
+                }
+            } catch (Exception ignored) { }
+            return arr.toString();
+        }
+
+        /** 网页启动完成，之后收到分享立刻通知；冷启动时网页会自己来取 */
+        @JavascriptInterface
+        public void shareReady() { jsReady = true; }
+
+        /** file:// 读不到时的退路：base64 回传（只给小文件，大文件走 XHR） */
+        @JavascriptInterface
+        public String readShared(String path) {
+            try {
+                File f = sharedFile(path);
+                if (f == null) return "ERR 路径不对";
+                if (f.length() > 8L * 1024 * 1024) return "ERR 文件太大，请在 App 里用＋重新选择";
+                byte[] b = new byte[(int) f.length()];
+                try (InputStream in = new FileInputStream(f)) {
+                    int off = 0, n;
+                    while (off < b.length && (n = in.read(b, off, b.length - off)) > 0) off += n;
+                }
+                return android.util.Base64.encodeToString(b, android.util.Base64.NO_WRAP);
+            } catch (Exception e) {
+                return "ERR " + (e.getMessage() == null ? "读不到" : e.getMessage());
+            }
+        }
+
+        @JavascriptInterface
+        public void clearShared(String path) {
+            try { File f = sharedFile(path); if (f != null) f.delete(); } catch (Exception ignored) { }
+        }
 
         /** 本机的局域网 IPv4 地址（逗号分隔），用来在同一网段里找电脑 */
         @JavascriptInterface

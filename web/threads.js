@@ -76,7 +76,7 @@ const _chatPanelT = chatPanel;
 chatPanel = function () {
   const title = Threads.titleOf(Threads.cur(), S.chat);
   return _chatPanelT()
-    .replace('<h3>管家 <span class="dim">DeepSeek</span></h3>',
+    .replace('<h3>管家</h3>',
       `<h3 class="thhead"><button class="mini ghost" id="thBtn">${esc(title)} ▾</button></h3>`)
     .replace('<button class="mini ghost" id="chatCtlBtn">', '<button class="mini" id="thNew" title="新对话">＋新</button><button class="mini ghost" id="chatCtlBtn">')
     .replace('<div id="chatCtl"></div>', '<div id="thList"></div><div id="chatCtl"></div>');

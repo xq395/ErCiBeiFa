@@ -64,7 +64,11 @@ function openTab(tab) {
 // 返回键：先关弹窗，再回"今天"，最后才退到后台
 function onNativeBack() {
   const m = $('#modal');
-  if (m && !m.classList.contains('hidden')) { m.classList.add('hidden'); return true; }
+  if (m && !m.classList.contains('hidden')) {
+    m.classList.add('hidden');
+    if (shareOpen) { shareOpen = false; shareItems = []; }
+    return true;
+  }
   if (curTab !== 'today') { openTab('today'); return true; }
   return false;
 }
@@ -156,6 +160,164 @@ function onNativeResume() {
   Timer.tick();
   pushWidget();
   autoCheck();
+}
+
+/* ---------- 分享 / 用其他 App 打开：收到文件后选去处 ---------- */
+// Java 把 content:// 复制到 App 缓存，再给网页 file:// 路径；网页读成 File 后复用附件/知识库流程。
+let shareItems = [], shareBusy = false, shareOpen = false, shareAgain = false;
+const shareSize = b => (b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB');
+
+function readSharedXhr(path) {
+  return new Promise((res, rej) => {
+    const x = new XMLHttpRequest();
+    x.open('GET', path, true);
+    x.responseType = 'arraybuffer';
+    x.timeout = 30000;
+    x.onload = () => {
+      const b = x.response;
+      if ((x.status === 0 || x.status === 200) && b && b.byteLength) res(b);
+      else rej(new Error('empty'));
+    };
+    x.onerror = () => rej(new Error('xhr'));
+    x.ontimeout = () => rej(new Error('timeout'));
+    x.send();
+  });
+}
+
+async function sharedToFile(m) {
+  const path = m.path || '';
+  let buf = null;
+  if (path && typeof XMLHttpRequest !== 'undefined') {
+    try { buf = await readSharedXhr(path); } catch (e) { buf = null; }
+  }
+  if (!buf || !buf.byteLength) {
+    const b64 = Native.readShared ? Native.readShared(path) : '';
+    if (!b64 || b64.startsWith('ERR')) {
+      const msg = b64 && b64.startsWith('ERR') ? b64.slice(4).trim() : '';
+      throw new Error(msg || '读不到分享的文件');
+    }
+    const bin = atob(b64), a = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+    buf = a.buffer;
+  }
+  return { f: new File([buf], m.name || '分享文件', { type: m.mime || '' }), text: !!m.text };
+}
+
+async function receiveShared() {
+  if (!IS_APP || !Native.takeShared) return;
+  if (shareBusy) { shareAgain = true; return; }
+  let list = [];
+  try { list = JSON.parse(Native.takeShared() || '[]'); } catch (e) { return; }
+  if (!Array.isArray(list) || !list.length) return;
+  shareBusy = true;
+  try {
+    for (const m of list) {
+      if (m.error) { toast(`${m.name || '文件'}：${m.error}`); continue; }
+      try { shareItems.push(await sharedToFile(m)); }
+      catch (e) { toast(`${m.name || '文件'}：${e.message || '读不到'}`); }
+    }
+    if (shareItems.length) showShare();
+  } finally {
+    shareBusy = false;
+    if (shareAgain) { shareAgain = false; setTimeout(receiveShared, 0); }
+  }
+}
+
+function showShare() {
+  const box = $('#modal');
+  if (!box) return;
+  shareOpen = true;
+  box.classList.remove('hidden');
+  box.innerHTML = `<div class="mbox"><div class="mhead"><b>收到 ${shareItems.length} 个文件</b>
+    <button class="ghost" data-share-close>×</button></div>
+    <div class="mbody"><div class="sharelist">${shareItems.map(it => `<div class="shareitem"><b>${esc(it.f.name || '分享文件')}</b>
+      <span class="dim">${it.text ? '文字' : shareSize(it.f.size)}</span></div>`).join('')}</div>
+      <div class="dim">放到哪里？</div></div>
+    <div class="btns shareacts">
+      <button class="primary" data-share="chat">加入当前对话</button>
+      <button data-share="new">新对话</button>
+      <button data-share="kb">存入知识库</button>
+    </div></div>`;
+}
+
+function readTextFile(f) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result || ''));
+    r.onerror = () => rej(new Error('读不到文字'));
+    r.readAsText(f);
+  });
+}
+
+async function attachSharedItems(items) {
+  const files = items.filter(x => !x.text).map(x => x.f);
+  const texts = [];
+  for (const x of items) if (x.text) {
+    try { texts.push((await readTextFile(x.f)).trim()); } catch (e) { /* 文字读不到就算了 */ }
+  }
+  if (files.length) await attachFiles(files);
+  const text = texts.filter(Boolean).join('\n\n');
+  if (text) {
+    const inp = $('#chatIn');
+    if (inp) {
+      inp.value = (inp.value ? inp.value.replace(/\s+$/, '') + '\n\n' : '') + text;
+      autoGrow(inp);
+    }
+    if (!files.length) toast('文字已放进输入框');
+  }
+  setTimeout(() => { const i = $('#chatIn'); if (i) i.focus(); }, 80);
+}
+
+async function sharedToKB(items) {
+  let ok = 0, failed = 0;
+  kbTab = 'docs';
+  kbBusy = '准备读取…';
+  openTab('kb');
+  for (const it of items) {
+    const name = it.f.name || '分享文件';
+    try {
+      kbBusy = `${name}：读取中…`; renderKB();
+      await importFile(it.f, msg => { kbBusy = `${name}：${msg}`; renderKB(); });
+      ok++;
+    } catch (e) { failed++; toast(`${name}：${e.message || '没读出来'}`); }
+  }
+  kbBusy = '';
+  renderKB();
+  toast(ok ? `已存入知识库：${ok} 个${failed ? `，${failed} 个失败` : ''}` : '没读出来，没能存入知识库');
+}
+
+document.addEventListener('click', async e => {
+  const t = e.target;
+  if (t.hasAttribute && t.hasAttribute('data-share-close')) {
+    shareItems = []; shareOpen = false;
+    $('#modal').classList.add('hidden');
+    return;
+  }
+  if (shareOpen && t.id === 'modal') {
+    shareItems = []; shareOpen = false;
+    $('#modal').classList.add('hidden');
+    return;
+  }
+  const act = t.dataset && t.dataset.share;
+  if (!act) return;
+  if (act === 'new') {
+    if (Chat.busy) { toast('管家还在回复，稍后再开新对话'); return; }
+    if (typeof Threads === 'undefined') { toast('这个版本还不支持新对话'); return; }
+    if (!Threads.create()) { toast('新对话没建成'); return; }
+  }
+  if (!['chat', 'new', 'kb'].includes(act)) return;
+  const items = shareItems.slice();
+  shareItems = []; shareOpen = false;
+  $('#modal').classList.add('hidden');
+  if (act === 'kb') { sharedToKB(items); return; }
+  openTab('chat');
+  attachSharedItems(items).catch(err => toast(err.message || '文件没读出来'));
+});
+
+if (IS_APP && Native.takeShared) {
+  window.onNativeShared = () => { receiveShared(); };
+  try { Native.shareReady && Native.shareReady(); } catch (e) { /* 旧版 App 没有这个桥 */ }
+  setTimeout(receiveShared, 300);
 }
 
 // 最后一个脚本：走到这里说明整个应用包启动成功（loader.js 据此判断新版本好不好）

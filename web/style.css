@@ -236,6 +236,13 @@ button:disabled { opacity: .5; }
 .chatimgs .chatimg { margin-bottom: 0; max-width: 132px; max-height: 132px; }
 .chatpend { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .chatpend img { height: 56px; border-radius: 6px; }
+.sharelist { margin: 4px 0 10px; }
+.shareitem { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 6px 0;
+  border-top: 1px dashed var(--line); font-size: 13px; }
+.shareitem:first-child { border-top: 0; }
+.shareitem b { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shareitem .dim { flex: none; }
+.shareacts { flex-wrap: wrap; }
 .chatpend .pimg { position: relative; display: inline-flex; }
 .chatpend .pimg button { position: absolute; top: -7px; right: -7px; width: 20px; height: 20px; padding: 0; border-radius: 50%;
   background: var(--line); color: var(--fg); line-height: 1; font-size: 13px; }
