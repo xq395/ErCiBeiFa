@@ -1,6 +1,8 @@
 'use strict';
 /* ---------- 安卓 App 外壳（window.Native）。浏览器里打开时这些都不生效 ---------- */
 const IS_APP = !!window.Native;
+// 分享状态放在前面：onNativeBack 在页面加载早期也可能被调用
+let shareItems = [], shareBusy = false, shareOpen = false, shareAgain = false;
 
 // 小组件数据：今天 + 明天（凌晨前后切换时不空白），每天按时间排好的课和空闲块
 function widgetData() {
@@ -164,7 +166,6 @@ function onNativeResume() {
 
 /* ---------- 分享 / 用其他 App 打开：收到文件后选去处 ---------- */
 // Java 把 content:// 复制到 App 缓存，再给网页 file:// 路径；网页读成 File 后复用附件/知识库流程。
-let shareItems = [], shareBusy = false, shareOpen = false, shareAgain = false;
 const shareSize = b => (b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB');
 
 function readSharedXhr(path) {
